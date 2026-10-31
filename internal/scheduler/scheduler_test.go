@@ -90,8 +90,33 @@ func TestEnabledSlotsSingleSourceOfTruth(t *testing.T) {
 	if got := New(all).enabledSlots(now); len(got) != 6 {
 		t.Fatalf("启用任务族应为 6 类，got %d: %v", len(got), got)
 	}
-	if got := New(all).missedToday(now); len(got) != 6 {
-		t.Fatalf("时点全过时 6 类都应补跑，got %v", got)
+	// 成长任务不参与启动补跑：定时时点照常生效，但重启不该立刻把全池任务跑一遍。
+	if got := New(all).missedToday(now); len(got) != 5 {
+		t.Fatalf("时点全过时只有 5 类应补跑（成长任务等定时时点），got %v", got)
+	}
+}
+
+// TestMissedTodaySkipsGrowth 成长任务只按定时时点跑：启动补跑会让用户以为
+// 「重启就自动把任务做完并领奖」，与定时任务的预期不符。
+func TestMissedTodaySkipsGrowth(t *testing.T) {
+	now := time.Date(2026, 10, 20, 15, 0, 0, 0, cst.Loc) // 11 点已过
+	got := New(Config{GrowthHours: []int{11}}).missedToday(now)
+	if hasKind(got, taskGrowth) {
+		t.Fatalf("启动补跑不应含 growth，got %v", got)
+	}
+	// 定时时点仍要能算出来（enabledSlots 的唯一口径不受影响；nextWake 只返回最近
+	// 一次唤醒的任务族，11 点不在 15:00 之后最近的 21:00 里，故断言 slots）。
+	if slots := New(Config{GrowthHours: []int{11}}).enabledSlots(now); len(slots) == 0 {
+		t.Fatal("定时时点不应因跳过补跑而消失")
+	}
+	var hasGrowth bool
+	for _, sl := range New(Config{GrowthHours: []int{11}}).enabledSlots(now) {
+		if sl.kind == taskGrowth && !sl.at.IsZero() {
+			hasGrowth = true
+		}
+	}
+	if !hasGrowth {
+		t.Fatal("enabledSlots 仍应包含非零时点的 growth（定时轮次要照常触发）")
 	}
 }
 

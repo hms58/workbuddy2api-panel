@@ -279,23 +279,11 @@ func (p *Panel) StartAccountTaskJob(uid, trigger string) (TaskJob, bool, error) 
 	return cloneTaskJob(job), true, nil
 }
 
-// StartNewAccountTasks 在配置开关开启时自动排入新国区账号的任务。
+// StartNewAccountTasks 新账号不再自动排队。成长任务只在定时时点跑：登录/导入即触发
+// 会让用户以为「加个号就把任务全做完了」，与「有定时任务就按定时跑」的预期不符。
+// 保留函数是为了不改 login.go / import.go 的调用点（减少与上游的合并冲突）。
 func (p *Panel) StartNewAccountTasks(uid string) {
-	if p == nil || p.cfg.AutoTasksEnabled == nil || !p.cfg.AutoTasksEnabled() {
-		return
-	}
-	if p.cfg.Pool == nil {
-		return
-	}
-	a := p.cfg.Pool.AuthByUID(uid)
-	if a == nil || a.IsGlobal() {
-		return
-	}
-	if _, started, err := p.StartAccountTaskJob(uid, "new_account"); err != nil {
-		log.Printf("panel: 新账号后台任务 uid=%s 启动失败: %v", uid, err)
-	} else if started {
-		log.Printf("panel: 新账号后台任务 uid=%s 已排队", uid)
-	}
+	_ = uid
 }
 
 // ResumeTaskJobs 恢复上次进程退出时未完成的作业。任务执行器先回读服务端状态，
@@ -321,7 +309,9 @@ func (p *Panel) ResumeTaskJobs() {
 	})
 	for _, uid := range uids {
 		job := m.jobs[uid]
-		if job.Trigger != "manual" && (p.cfg.AutoTasksEnabled == nil || !p.cfg.AutoTasksEnabled()) {
+		// 只恢复人工发起的作业：定时/新账号触发的作业一律等下个定时时点，
+		// 否则重启就等于「立刻跑一遍成长任务」（用户意料之外）。
+		if job.Trigger != "manual" {
 			continue
 		}
 		if p.cfg.Pool == nil {

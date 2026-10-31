@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -269,5 +270,33 @@ func TestClaimAllRespectsAccountLock(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.claims) != 0 {
 		t.Fatalf("持锁期间不得领奖，claims=%v", f.claims)
+	}
+}
+
+// TestResumeTaskJobsSkipsDaily 启动只恢复人工发起的作业；定时作业一律等下个时点，
+// 否则重启就等于「立刻跑一遍成长任务」。
+func TestResumeTaskJobsSkipsDaily(t *testing.T) {
+	state := &taskJobServerState{firstCall: make(chan struct{}), release: make(chan struct{})}
+	p, cancel, path := newTaskJobTestPanel(t, "cn-resume", "cn", state)
+	t.Cleanup(func() { cancel(); p.StopTaskJobs() })
+	state.open()
+
+	now := time.Now().UTC()
+	raw, err := json.Marshal(taskJobFile{Version: 1, Jobs: []TaskJob{
+		{ID: "daily-1", UID: "cn-resume", Realm: "cn", Trigger: "daily", Status: "interrupted",
+			StartedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Second), Total: len(autoActions)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.ResumeTaskJobs()
+	if job, ok := p.GetTaskJob("cn-resume"); ok && (job.Status == "pending" || job.Status == "running") {
+		t.Fatalf("定时作业不应在启动时恢复: %+v", job)
+	}
+	if got := state.count(); got != 0 {
+		t.Fatalf("定时作业不应发起上游请求，实际 %d 次", got)
 	}
 }
