@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -298,5 +299,55 @@ func TestResumeTaskJobsSkipsDaily(t *testing.T) {
 	}
 	if got := state.count(); got != 0 {
 		t.Fatalf("定时作业不应发起上游请求，实际 %d 次", got)
+	}
+}
+
+// TestGrowthClaimFrontendWiring 前端接线齐备性：少一个 id/词条/映射，表现为
+// 「配置存不上」或「待领取显示成失败」，而 Go 编译与 JS 语法检查都发现不了。
+func TestGrowthClaimFrontendWiring(t *testing.T) {
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(html, []byte(`name="growth_claim_mode"`)) {
+		t.Fatal("index.html 缺少 growth_claim_mode 配置控件")
+	}
+	if !bytes.Contains(html, []byte(`value="manual"`)) || !bytes.Contains(html, []byte(`value="auto"`)) {
+		t.Fatal("growth_claim_mode 下拉必须同时提供 manual 与 auto")
+	}
+
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"growth_claim_mode: ['schedule', 'growth_claim_mode']",
+		"claim_manual: '待领取'",
+		"claim_manual: 0",
+		"if (counts.claim_manual) parts.push('待领取 '",
+	} {
+		if !bytes.Contains(js, []byte(want)) {
+			t.Fatalf("app.js 缺少 %q", want)
+		}
+	}
+}
+
+// TestQueueSummaryCountsClaimManual 队列汇总必须把「待领取」单独计数：它既不是完成
+// 也不是失败，混进任何一边都会让用户误读本轮结果。
+func TestQueueSummaryCountsClaimManual(t *testing.T) {
+	q := &queueState{seq: 1, items: []queueItem{
+		{Code: "chat_5", Status: "done", Credit: 100},
+		{Code: "Library_read", Status: "claim_manual"},
+		{Code: "template_5", Status: "claim_pending", Message: "boom"},
+	}}
+	got := q.summaryLocked(0)
+	if !strings.Contains(got, "待领取 1") {
+		t.Fatalf("汇总缺待领取计数: %s", got)
+	}
+	if !strings.Contains(got, "领奖待重试 1") {
+		t.Fatalf("领奖待重试计数被吞: %s", got)
+	}
+	if !strings.Contains(got, "完成 1") || !strings.Contains(got, "失败 0") {
+		t.Fatalf("既有计数被改动: %s", got)
 	}
 }
