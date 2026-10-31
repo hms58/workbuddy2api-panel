@@ -2061,6 +2061,7 @@ function openTasks(uid) {
   taskUID = uid;
   taskCapabilities = { accept: false, claim: false, automate: false };
   $('btnTaskAcceptAll').hidden = true;
+  $('btnTaskClaimAll').hidden = true;
   $('btnTaskAutoAll').hidden = true;
   $('taskNote').hidden = true;
   $('taskJobView').hidden = true;
@@ -2096,6 +2097,25 @@ $('btnTaskAcceptAll').onclick = async () => {
     }
   } catch (e) { toast(e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '全部接受'; loadTasks(); }
+};
+
+// 全部领取：把该账号攒下的「已达标未领」奖励一次性领掉。
+// 完成与领奖拆两步后（growth_claim_mode=manual），定时轮次不领奖，靠这个入口收积分。
+$('btnTaskClaimAll').onclick = async () => {
+  if (!taskUID) return;
+  const btn = $('btnTaskClaimAll');
+  btn.disabled = true; btn.textContent = '领取中…';
+  try {
+    const r = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks/claim_all', { method: 'POST' });
+    const n = r.claimed || 0;
+    const gain = (r.credit ? r.credit + ' 分' : '') + (r.energy ? ' +' + r.energy + ' 能' : '');
+    if (r.failed && r.failed.length) {
+      toast(`已领取 ${n} 项${gain ? '（' + gain + '）' : ''}，${r.failed.length} 项失败可重试`, 'err');
+    } else {
+      toast(n ? `已领取 ${n} 项${gain ? '（' + gain + '）' : ''}` : '没有可领取的奖励', 'ok');
+    }
+  } catch (e) { toast(e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '全部领取'; loadTasks(); }
 };
 
 // 后台执行：请求仅启动任务，页面轮询进度；关闭弹窗不影响服务端执行。
@@ -2228,6 +2248,7 @@ async function loadTasks() {
     if (taskUID !== uid) return;
     taskCapabilities = d.capabilities || { accept: d.realm !== 'global', claim: d.realm !== 'global', automate: d.realm !== 'global' };
     $('btnTaskAcceptAll').hidden = !taskCapabilities.accept;
+    $('btnTaskClaimAll').hidden = !taskCapabilities.claim;
     $('btnTaskAutoAll').hidden = !taskCapabilities.automate;
     $('taskNote').textContent = d.message || (d.realm === 'global' ? '国际区任务当前仅支持查询，请在官方客户端完成。' : '');
     $('taskNote').hidden = !$('taskNote').textContent;
@@ -2259,6 +2280,7 @@ async function loadTasks() {
     if (taskUID !== uid) return;
     taskCapabilities = { accept: false, claim: false, automate: false };
     $('btnTaskAcceptAll').hidden = true;
+    $('btnTaskClaimAll').hidden = true;
     $('btnTaskAutoAll').hidden = true;
     st.className = 'state err';
     st.textContent = e.message;

@@ -330,6 +330,14 @@ func TestGrowthClaimFrontendWiring(t *testing.T) {
 			t.Fatalf("app.js 缺少 %q", want)
 		}
 	}
+
+	// 全部领取入口必须接上：后端 handler 存在但没有按钮调用，用户依然只能逐个点。
+	if !bytes.Contains(html, []byte(`id="btnTaskClaimAll"`)) {
+		t.Fatal("index.html 缺少「全部领取」按钮")
+	}
+	if !bytes.Contains(js, []byte(`/tasks/claim_all`)) {
+		t.Fatal("app.js 没有调用 claim_all 接口（按钮点了没反应）")
+	}
 }
 
 // TestQueueSummaryCountsClaimManual 队列汇总必须把「待领取」单独计数：它既不是完成
