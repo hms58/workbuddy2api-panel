@@ -263,3 +263,25 @@ func TestTaskSweepSkipsBusyAccount(t *testing.T) {
 		t.Fatalf("解锁后应补上：swept=%d claims=%v msg=%s", swept, f.claims, msg)
 	}
 }
+
+// 手动领取模式下清扫只做「待接受任务报名」，不领奖：否则 15 分钟一轮会把攒的奖
+// 全部领掉，手动模式名不副实。
+func TestTaskSweepManualModeOnlyAccepts(t *testing.T) {
+	f := &sweepFake{tasks: []*sweepTask{
+		{Code: "Buddy_App", Current: 0, Target: 1, NotAcc: true}, // 待接受（未达标才会被报名）
+		{Code: "Library_read", Current: 1, Target: 1},            // 已接受 + 达标未领
+	}}
+	pn := sweepPanel(t, f, &auth.Auth{UID: "cn-1", Nickname: "cn", AccessToken: "at"})
+	pn.SetGrowthClaimMode(claimModeManual)
+
+	swept, msg := pn.RunTaskSweepNow()
+	if swept != 1 {
+		t.Fatalf("swept=%d want 1；msg=%s", swept, msg)
+	}
+	if len(f.accepts) == 0 {
+		t.Fatalf("待接受任务仍应报名，accepts=%v", f.accepts)
+	}
+	if len(f.claims) != 0 {
+		t.Fatalf("手动模式不得领奖，claims=%v", f.claims)
+	}
+}

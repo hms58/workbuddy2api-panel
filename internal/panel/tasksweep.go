@@ -97,6 +97,11 @@ func (p *Panel) sweepAccount(a *auth.Auth) (accepted, claimed int, err error) {
 		if !t.Claimable || t.Locked {
 			continue // 锁定 = 上游未解锁（Sequential 族每日解锁一环），领也领不到
 		}
+		// 手动领取模式：只报名不领奖，积分攒着等人工领（活动 24h 内截止的除外）。
+		if allowed, reason := p.autoClaimAllowed(&t); !allowed {
+			log.Printf("panel: 补领清扫跳过 %s %s（%s）", label, t.TaskCode, reason)
+			continue
+		}
 		// mp 专属码走 mp 领奖（自带 Web 域 400 降级）；只在 mp 列表出现的码同办，
 		// 否则 Web 域对 mp 任务 400 会变成每轮一条 WARN。
 		var cerr error
