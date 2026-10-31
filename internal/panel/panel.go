@@ -11,6 +11,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -29,6 +30,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/credithist"
 	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
+	"github.com/misakano7545/workbuddy2api-panel/internal/modelgroup"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/scheduler"
@@ -89,6 +91,24 @@ type Config struct {
 	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
 	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。
 	ModelFallback func() map[string]string
+
+	// GroupSet 模型组集合（nil = 未启用「模型组」菜单，接口返回 501）。
+	GroupSet func() *modelgroup.GroupSet
+	// GroupCache 模型组可用性缓存（nil = 不显示探活时刻）。
+	GroupCache func() *modelgroup.Cache
+	// ModelGroupOpts 模型组全局参数（已补齐缺省）。
+	// 为什么单独注入：组集合为空时（全新部署）GroupSet 是 nil，拿不到 Options，
+	// 而裸零值会把两个 bool 开关显示成 false —— 必须回落到配置里的真实缺省。
+	ModelGroupOpts *modelgroup.Options
+	// SaveModelGroups 保存组配置（由 main 注入：改 config → 落盘 → livecfg.Store）。
+	// 面板包不依赖 config 结构，新菜单因此对既有配置页零影响。
+	SaveModelGroups func([]modelgroup.GroupConfig, modelgroup.Options) error
+	// SniffModelGroups 手动触发一轮嗅探（面板「立即嗅探全部」）。
+	// 由 main 注入：直接调 modelgroup.Sniffer.RunOnce —— 与定时嗅探同一份逻辑，
+	// 频率上限（sniff_min_gap）、锁因过滤（只探 model_rate）、可见性过滤全部复用，
+	// 面板因此不需要自己判断「哪些能探」。返回 (本轮探活次数, 恢复数)。
+	// nil = 未接线（接口返回 501）。
+	SniffModelGroups func(ctx context.Context) (probed, recovered int, err error)
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -275,6 +295,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
+	// 模型组：读写组配置 + 成员运行态（状态取自 ModelLockView，与「模型锁池」同源）。
+	p.mux.HandleFunc("GET /panel/api/model_groups", p.withAuth(p.modelGroupsGet))
+	p.mux.HandleFunc("POST /panel/api/model_groups", p.withAuth(p.modelGroupsPost))
+	// 「立即嗅探全部」：跑一轮与定时嗅探完全相同的逻辑（含频率上限）。
+	p.mux.HandleFunc("POST /panel/api/model_groups/sniff", p.withAuth(p.modelGroupsSniff))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))

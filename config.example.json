@@ -108,7 +108,15 @@
     "cost_explore_interval": "30m",
     "credit_floor": 100,
     "reserve_credits": 10,
-    "model_fallback": {}
+    "model_fallback": {},
+    "model_groups": [],
+    "model_group": {
+      "prefer_last_ok": true,
+      "sniff_enabled": true,
+      "sniff_interval": "60s",
+      "sniff_min_until": "5m",
+      "sniff_min_gap": "10m"
+    }
   },
   "session_sticky": {
     "enabled": true,

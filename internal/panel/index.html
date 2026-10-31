@@ -740,6 +740,116 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .ip-mono { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--ink-2); }
 .ua-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--ink-3); cursor: help; }
 
+  /* ── 模型组视图 ─────────────────────────────────────────────────────── */
+  .mgwrap { display: grid; grid-template-columns: 262px minmax(0, 1fr); gap: 20px; align-items: start; padding: 0 17px 17px; }
+  .mglistbox { margin-bottom: 0; }
+  .mglist { display: flex; flex-direction: column; }
+  .mgitem { display: flex; align-items: flex-start; gap: 10px; padding: 12px 15px; border-bottom: 1px solid var(--line-soft); cursor: pointer; }
+  .mgitem:last-child { border-bottom: none; }
+  .mgitem:hover { background: var(--surface-2); }
+  .mgitem.on { background: var(--accent-soft); }
+  .mgitem.on .mgname { color: var(--accent); }
+  .mgitem .mgname { font-weight: 580; font-size: 13.5px; }
+  .mgitem .mgmeta { font-size: 11.5px; color: var(--ink-3); margin-top: 3px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mgitem .mgright { margin-left: auto; text-align: right; flex: none; }
+  .mgmemhead { border-top: 1px solid var(--line-soft); border-bottom: none !important; }
+  .members { display: flex; flex-direction: column; }
+  .mgrow {
+    display: grid; grid-template-columns: 20px 26px minmax(0,1fr) 92px auto;
+    gap: 14px; align-items: center; padding: 12px 15px;
+    border-bottom: 1px solid var(--line-soft); font-size: 13px;
+  }
+  .mgrow:last-child { border-bottom: none; }
+  .mgrow:hover { background: var(--surface-2); }
+  .mgrow.off .mgmodel { text-decoration: line-through; color: var(--ink-3); }
+  .mgrow.off .mgsub { opacity: .6; }
+  .mgrow .mgidx { font: 11.5px var(--mono); color: var(--ink-3); text-align: right; }
+  .mgrow .mglead { display: flex; align-items: center; gap: 5px; }
+  .mgrow .mggrip { color: var(--ink-3); cursor: grab; display: flex; justify-content: center; }
+  .mgrow .mgmid { min-width: 0; }
+  .mgrow .mgmodel { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mgrow .mgsub { font-size: 11.5px; color: var(--ink-3); margin-top: 3px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .mgrow .mgw { display: flex; align-items: center; gap: 5px; }
+  .mgrow .mgw input { padding: 4px 8px; font-size: 12.5px; text-align: right; font-family: var(--mono); }
+  .mgrow .mghand { font-size: 10px; color: var(--warn); border: 1px solid var(--warn-soft); background: var(--warn-soft); border-radius: 4px; padding: 0 4px; }
+  /* 右侧操作区：状态标签 + 时段 + ↑↓ + ✕ 共 5 项，必须给足横向空间与点击热区，
+     否则按钮挤成一坨既难点也不好看（列宽用 auto 按内容自适应，中列 1fr 让出余量）。 */
+  .mgrow .mgacts { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
+  .mgrow .mgacts .tag { flex: none; white-space: nowrap; padding: 2px 7px; }
+  .mgrow .mgacts button.xs { padding: 5px 10px; min-width: 30px; flex: none; }
+  .mgrow .mgacts button[data-mgdel] { min-width: 32px; }
+  .mgwin { padding: 0 15px 12px 61px; background: var(--surface-2); border-bottom: 1px solid var(--line-soft); }
+  .mgwin .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .mgwin input[type=time] { width: 118px; padding: 5px 8px; font-family: var(--mono); font-size: 13px; }
+  .mgwin .presets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .mgwin .presets button { font-size: 11.5px; padding: 2px 8px; border-radius: 999px; }
+  /* 添加成员：搜索框 + 可多行预览的列表 + 按钮。
+     目录有 80+ 个模型，单行 <select> 只能盲选；改成搜索过滤 + size 列表，输入即筛。 */
+  .mgadd { display: flex; gap: 8px; align-items: center; padding: 12px 15px; background: var(--surface-2); flex-wrap: wrap; }
+  /* 搜索框约占 1/3：它只需输入几个字符，把余下宽度让给候选列表（模型名较长，需要横向空间）。
+     calc 里减去一个 gap，否则 33% + gap 会略微挤掉列表宽度。 */
+  .mgadd input[type=search] { flex: 0 0 calc(33.333% - 8px); min-width: 140px; }
+  .mgadd select { flex: 1 1 200px; min-width: 180px; font-family: var(--mono); font-size: 12.5px; }
+  .mgadd select option { padding: 3px 6px; }
+  .mgadd .mgaddnote { flex-basis: 100%; font-size: 11.5px; color: var(--ink-3); }
+  .mgfoot { display: flex; align-items: center; gap: 10px; padding: 12px 15px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
+  .mgfoot .grow { flex: 1; }
+  /* 模型锁状态表：独立于上方编辑器，横跨整行（与组列表/编辑器同宽） */
+  .mglocksbox { margin: 20px 17px 0; }
+  .mglocksbox .tbl-wrap { overflow-x: auto; }
+  .mglocksbox td { vertical-align: middle; }
+  .mglocksbox td .mgwho { font-family: var(--mono); font-size: 12.5px; }
+  .mglocksbox td .mgwho-sub { font-size: 11px; color: var(--ink-3); }
+  .mglocksbox td .mgwhy { max-width: 280px; font-size: 11.5px; color: var(--ink-2); }
+  /* 锁表右上两个动作按钮成组：组内 8px 间隔（比 header 的 12px 略紧），
+     视觉上像一组动作而不是两个独立控件。
+     ⚠ 不能给组设 flex:none —— 那会让它在窄屏无法收缩，被 header 裁掉
+     （实测 820px 时「刷新列表」右边界超出 header 约 77px）。这里允许收缩，
+     并靠 header 的 flex-wrap 在空间不足时整体换到下一行。 */
+  .mglockbtns { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; }
+  .mglockbtns button { flex: none; }
+  /* 极窄屏：两个按钮各占一半宽度，避免文字被挤到换行 */
+  @media (max-width: 860px) {
+    .mglockbtns { flex-basis: 100%; justify-content: flex-end; }
+  }
+  @media (max-width: 900px) { .mgwrap { grid-template-columns: 1fr; } }
+
+  /* 模型组 · 窄屏（760px）成员行重排。
+     ⚠ 必须放在 .mgrow 基础样式「之后」：同特异性规则靠源码顺序决胜负，
+     写在前面会被后面的桌面 5 列定义盖掉（历史坑：曾导致移动端仍按 5 列渲染）。
+     拖柄在触屏上与滚动冲突，隐藏后由 ↑↓ 按钮兜底。 */
+  @media (max-width: 760px) {
+    .mgwrap { padding: 0 12px 12px; }
+    /* 列：序号 | 启停勾选 | 模型 | 权重。
+       ⚠ 启停勾选必须留在窄屏上 —— 它是成员级唯一的开关。历史缺陷：.mglead 在这里
+       被整块 display:none，用户实测反馈「移动端没有开启/关闭模型的按钮」。
+       真正该隐藏的只有拖柄（触屏拖拽与页面滚动冲突，已由 ↑↓ 按钮兜底）。 */
+    .mgrow {
+      display: grid;
+      grid-template-columns: 18px 22px minmax(0,1fr) 82px;
+      grid-template-areas: "idx chk mid w" "acts acts acts acts";
+      gap: 6px 8px; padding: 12px 13px;
+    }
+    .mgrow .mgidx { grid-area: idx; }
+    .mgrow .mglead { display: flex; grid-area: chk; justify-content: center; }
+    .mgrow .mglead input[type=checkbox] { width: 18px; height: 18px; margin: 0; }
+    .mgrow .mgmid { grid-area: mid; }
+    .mgrow .mgw { grid-area: w; }
+    .mgrow .mgacts { grid-area: acts; justify-content: flex-start; padding-top: 6px; gap: 8px; }
+    .mgrow .mggrip { display: none; }
+    /* 触屏点击热区再放大一档（手指比鼠标粗） */
+    .mgrow .mgacts button.xs { padding: 7px 12px; min-width: 38px; }
+    .mgwin { padding-left: 13px; }
+    .mgwin input[type=time] { width: 104px; }
+    /* 添加成员：搜索框 / 候选列表 / 按钮各占整行。桌面把搜索框压到约 1/3 宽，
+       手机上只剩 ~130px，输入时连自己打的字都看不全（用户实测反馈「搜索框移动端
+       不生效」）。这里用 flex 简写覆盖三个分量而不是只改 flex-basis —— 桌面规则里
+       还有 flex-grow/shrink，只改 basis 会被"不可收缩 + 1/3 宽"的组合卡住。 */
+    .mgadd { padding: 12px 13px; }
+    .mgadd input[type=search],
+    .mgadd select { flex: 1 1 100%; width: 100%; min-width: 0; }
+    .mgadd button { flex: 1 1 100%; }
+  }
 </style>
 </head>
 <body>
@@ -770,6 +880,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
+      <li><a href="#modelgroups" data-view="modelgroups">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/><circle cx="5" cy="4.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="10.5" cy="8" r="1.5" fill="currentColor" stroke="none"/><circle cx="7" cy="11.8" r="1.5" fill="currentColor" stroke="none"/></svg>
+        模型组</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -1160,6 +1273,93 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <thead id="usCreditHead"></thead>
             <tbody id="usCreditBody"></tbody>
           </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 模型组 -->
+    <section class="view" id="view-modelgroups" hidden>
+      <div class="box">
+        <header>
+          <h3>模型组 <span class="hint">客户端用 group:&lt;id&gt; 点名；成员按权重降序，同权重内上次可用者优先</span></h3>
+          <div class="grow"></div>
+          <span class="note" id="mgNote"></span>
+        </header>
+        <div class="mgwrap">
+          <div class="box mglistbox">
+            <header>
+              <h3>组列表</h3>
+              <div class="grow"></div>
+              <button class="xs" id="mgNewBtn">+ 新建</button>
+            </header>
+            <div class="mglist" id="mgList"></div>
+          </div>
+          <div class="box">
+            <header>
+              <h3 id="mgTitle">编辑组</h3>
+              <span class="tag mute" id="mgStateTag">启用</span>
+              <div class="grow"></div>
+              <span class="note" id="mgSwitchNote"></span>
+            </header>
+            <!-- 编辑器字段必须是静态结构：app.js 用 $('mgID') 这类字面 id 取值，
+                 运行时拼 innerHTML 会让 frontend_test 的「id 必须在 HTML 里存在」
+                 护栏失效（元素缺失时症状是整块视图静默空白）。 -->
+            <div class="pad" id="mgBody">
+              <div class="grid2">
+                <label class="fld"><span class="lb">组 ID（客户端填 group:&lt;id&gt;）</span>
+                  <input id="mgID" spellcheck="false">
+                  <span class="hint">小写；改动后客户端需同步改 model 字段</span></label>
+                <label class="fld"><span class="lb">展示名</span>
+                  <input id="mgName"></label>
+              </div>
+              <div class="inline" style="gap:22px;margin-bottom:6px;flex-wrap:wrap">
+                <label class="inline" style="gap:7px;cursor:pointer"><input type="checkbox" id="mgEnabled"><span style="font-size:12.5px">启用组</span></label>
+                <label class="inline" style="gap:7px;cursor:pointer" title="只在「同权重」的成员之间生效：权重更高的成员恢复可用时仍优先用它"><input type="checkbox" id="mgPrefer"><span style="font-size:12.5px">上次可用成员优先</span></label>
+                <label class="inline" style="gap:7px;cursor:pointer"><input type="checkbox" id="mgSniff"><span style="font-size:12.5px">定时嗅探恢复</span></label>
+              </div>
+              <div class="note" style="margin-top:8px;line-height:1.6" id="mgSniffNote"></div>
+            </div>
+            <header class="mgmemhead">
+              <h3>成员 <span class="hint">拖动排序；权重越大越优先；可单独启停与设生效时段</span></h3>
+              <div class="grow"></div>
+              <span class="note" id="mgMemNote"></span>
+            </header>
+            <div class="members" id="mgMembers"></div>
+            <div class="mgadd">
+              <input id="mgAddQ" type="search" placeholder="搜索模型（ID / 域），如 glm 或 global:" aria-label="搜索可添加的模型">
+              <select id="mgAddSel" size="6" aria-label="可添加的模型"></select>
+              <button class="xs primary" id="mgAddBtn">添加成员</button>
+              <div class="mgaddnote" id="mgAddNote"></div>
+            </div>
+            <div class="mgfoot">
+              <span class="note" id="mgFootNote"></span>
+              <div class="grow"></div>
+              <button class="xs danger" id="mgDelBtn">删除组</button>
+              <button class="xs primary" id="mgSaveBtn">保存</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 模型锁状态：与账号池「模型锁池」同源（pool.ModelLockView），只列可见成员。
+             停用与时段外的成员不参与：探活了也用不上，纯消耗额度。 -->
+        <div class="box mglocksbox">
+          <header>
+            <h3>模型锁状态 <span class="hint">与账号池「模型锁池」同源；停用与时段外的成员不参与</span></h3>
+            <div class="grow"></div>
+            <span class="note" id="mgLockNote"></span>
+            <div class="mglockbtns">
+              <button class="xs ghost" id="mgSniffAllBtn">立即嗅探全部</button>
+              <button class="xs ghost" id="mgLockRefreshBtn" title="重新读取锁状态（不触发探活）">刷新列表</button>
+            </div>
+          </header>
+          <div class="tbl-wrap">
+            <table class="acc">
+              <thead><tr>
+                <th>成员</th><th>可见性</th><th>状态</th><th>可服务 / 总数</th><th>锁因</th><th>最早解锁</th><th>上次探活</th><th></th>
+              </tr></thead>
+              <tbody id="mgLockBody"></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </section>

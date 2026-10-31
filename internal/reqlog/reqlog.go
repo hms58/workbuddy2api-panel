@@ -65,8 +65,15 @@ type Event struct {
 	Time             time.Time `json:"time"`
 	RequestID        string    `json:"request_id"`
 	Path             string    `json:"path"`
-	Account          string    `json:"account,omitempty"`
-	Model            string    `json:"model,omitempty"`
+	Account string `json:"account,omitempty"`
+	// Model 客户端点名的模型（组请求时是 group:<id>）。筛选/账本都按它走，
+	// 不要为了展示把实际成员写进来 —— 那会让「按 group:x 筛」永远搜不到记录。
+	Model string `json:"model,omitempty"`
+	// GroupModel 组请求专用：模型组的展示名，形如 "group:auto-flash/cn:deepseek-v4.1-flash"。
+	// 空 = 非组请求（前端直接显示 Model）。
+	// 为什么不复用 Model：Model 是筛选与账本的键，改成组合串会让既有的
+	// 「按模型筛请求」「按模型聚合用量」全部错位；展示需要的是另一维度的事实。
+	GroupModel       string    `json:"group_model,omitempty"`
 	Status           int       `json:"status"`
 	OK               bool      `json:"ok"`
 	Outcome          string    `json:"outcome"`
