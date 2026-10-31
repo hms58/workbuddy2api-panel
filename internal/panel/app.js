@@ -449,7 +449,7 @@ $('btnLogout').onclick = () => {
 };
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', config: '配置', events: '请求事件日志', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', modelgroups: '模型组', config: '配置', events: '请求事件日志', logs: '运行日志' };
 function go(v) {
   navSet(false);
   view = v;
@@ -457,6 +457,9 @@ function go(v) {
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
   if (v === 'models' && !$('mdBody').children.length) loadModels();
+  // 首屏加载失败时 loadModelGroups 会抛出（供刷新按钮区分成败），
+  // 这里已有「正在读取…」被替换成错误文案，吞掉即可，不要冒泡到视图切换。
+  if (v === 'modelgroups' && !$('mgList').children.length) loadModelGroups().catch(() => {});
   if (v === 'config') loadConfig();
   // 切到日志视图：本地窗口为空（首次）时全量拉一次；已有窗口则继续增量。
   // 注意**不要**在每次切视图时 resetLogWindow()——那会把增量游标清掉，下一轮
@@ -944,6 +947,9 @@ async function loadModels(force) {
       api('request_metrics').catch(() => ({})),
     ]);
     mdAll = d.models || [];
+    // 模型组「添加成员」下拉复用这一份目录，不额外打上游。
+    // /panel/api/models 的 id 已带域前缀（cn:xxx / global:xxx），直接用，不再拼前缀。
+    mgFillModels(mdAll);
     mdProbes = pr.probes || {};
     mdLocks = Array.isArray(st.model_locks) ? st.model_locks : [];
     mdRecent = Array.isArray(rm.recent) ? rm.recent : [];
@@ -1378,13 +1384,37 @@ function reqMatch(e, f) {
   f = f || reqFilter;
   if (f.outcome && String(e && e.outcome || '') !== f.outcome) return false;
   if (f.q) {
-    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.account, e && e.request_id]
+    // group_model 必须一起参与匹配：组请求的 e.model 只有 "group:auto-flash"，
+    // 不带上实际成员名就搜不到 "deepseek"（而那正是排查时最常用的关键词）。
+    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.group_model,
+      e && e.account, e && e.request_id]
       .filter(Boolean).join(' ').toLowerCase();
     for (const kw of f.q.toLowerCase().split(/\s+/).filter(Boolean)) {
       if (!text.includes(kw)) return false;
     }
   }
   return true;
+}
+
+/* reqModelCell 渲染「模型」列。
+ *
+ * 组请求显示 "group:<id>/<实际成员>"（后端下发的 group_model）：
+ * 只显示组名看不出到底用了哪个模型，只显示成员名又不知道客户端点的是哪个组。
+ * 非组请求直接显示模型名（group_model 为空）。
+ * 组名与成员名分两行展示：组合串在窄屏会被截断，分行更易读。
+ */
+function reqModelCell(e) {
+  const gm = e && e.group_model;
+  if (gm) {
+    const i = gm.indexOf('/');
+    const group = i > 0 ? gm.slice(0, i) : gm;
+    const member = i > 0 ? gm.slice(i + 1) : '';
+    return '<span class="clip" title="' + esc(gm) + '">' +
+      '<b>' + esc(group) + '</b>' +
+      (member ? '<div class="note" style="font-size:11px;font-family:var(--mono)">' + esc(member) + '</div>' : '') +
+      '</span>';
+  }
+  return esc(e && e.model || '—');
 }
 
 function reqOutcomeTag(e) {
@@ -1422,7 +1452,7 @@ function renderRequestTable() {
     return '<tr title="' + esc(requestLogText(e)) + '">' +
       '<td class="num">' + esc(when) + '</td>' +
       '<td>' + reqOutcomeTag(e) + '</td>' +
-      '<td>' + esc(e && e.model || '—') + '</td>' +
+      '<td>' + reqModelCell(e) + '</td>' +
       '<td>' + esc(e && e.account || '—') + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
@@ -1477,7 +1507,9 @@ function requestLogText(e) {
   return [
     when,
     String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
-    e && e.model || '—',
+    // 组请求优先显示「组名/实际成员」：tooltip 是排查时看的最完整的一行，
+    // 只给组名会让人误判到底打了哪个模型。
+    e && e.group_model || e && e.model || '—',
     e && e.account || '—',
     e && e.client_ip || '—',
     e && e.user_agent || '—',
@@ -5013,4 +5045,777 @@ if ($('btnEventExport')) $('btnEventExport').onclick = () => {
   a.download = 'request-events-' + new Date().toISOString().slice(0, 10) + '.json';
   a.click();
   URL.revokeObjectURL(url);
+};
+
+/* ── 模型组 ─────────────────────────────────────────────────────────
+   与后端 GET/POST /panel/api/model_groups 对应。
+   成员可见性 = enabled && 在生效时段内，与后端 modelgroup.Member.IsVisible 同算法
+   （左闭右开、支持跨天）。这里复刻是为了在未保存时就地预览「时段外」标签。
+
+   状态标签直接复用账号池「模型锁池」表的 ML_STATE（见上方定义），
+   不新造词 —— 两处面板必须给出同样的中文标签（设计文档 §13.5）。 */
+let mgGroups = [];
+let mgCur = 0;
+let mgOpts = { prefer_last_ok: true, sniff_enabled: true, sniff_interval: '60s', sniff_min_until: '5m', sniff_min_gap: '10m' };
+let mgDirty = false;
+let mgOpenWin = -1;   // 展开时段编辑的成员下标
+let mgAllModels = []; // 成员下拉候选（来自 /panel/api/models）
+
+/* parseWin 解析 "HH:MM-HH:MM"。空/非法 → null（全天）。 */
+function parseWin(w) {
+  if (!w) return null;
+  const m = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/.exec(String(w).trim());
+  if (!m) return null;
+  const toMin = (h, mi) => {
+    const hh = Number(h), mm = Number(mi);
+    if (hh > 23 || mm > 59) return null;
+    return hh * 60 + mm;
+  };
+  const s = toMin(m[1], m[2]), e = toMin(m[3], m[4]);
+  if (s == null || e == null) return null;
+  return { s, e, cross: s > e, full: s === e };
+}
+/* inWin 与后端同算法：左闭右开；跨天 = now >= start || now < end。 */
+function inWin(w) {
+  const p = parseWin(w);
+  if (!p || p.full) return true;
+  const d = new Date();
+  const t = d.getHours() * 60 + d.getMinutes();
+  return p.cross ? (t >= p.s || t < p.e) : (t >= p.s && t < p.e);
+}
+/* nextSwitch 下一个时段边界（用于「时段外 · 23:00 生效」提示）。 */
+function nextSwitch(w) {
+  const p = parseWin(w);
+  if (!p || p.full) return null;
+  const hhmm = v => String(Math.floor(v / 60)).padStart(2, '0') + ':' + String(v % 60).padStart(2, '0');
+  return inWin(w) ? { at: hhmm(p.e), kind: '结束' } : { at: hhmm(p.s), kind: '生效' };
+}
+
+/* mgFillModels 把模型目录填进「添加成员」候选。
+   /panel/api/models 的 id 已带域前缀（cn:xxx / global:xxx），直接用作成员名 ——
+   成员需要显式域，这里的 id 正好就是这个形态，不要再拼一次前缀（会得到 cn:cn:xxx）。 */
+function mgFillModels(list) {
+  mgAllModels = (list || []).map(m => (typeof m === 'string' ? m : (m && m.id))).filter(Boolean);
+}
+
+/* mgEnsureModels 进入模型组页时按需拉一次目录。
+   模型组页可以在没访问过「模型与档位」的情况下直接进入，此时 mgAllModels 还是空的，
+   「添加成员」下拉会是空白 —— 这里补一次拉取。失败只提示，不阻塞页面其余部分。 */
+let mgModelsLoading = null;
+let mgModelsErr = '';   // 上次拉取失败原因：非空时不再自动重试，避免每次重渲染都打一次上游
+async function mgEnsureModels() {
+  if (mgAllModels.length || mgModelsErr) return;
+  if (mgModelsLoading) return mgModelsLoading;
+  mgModelsLoading = (async () => {
+    try {
+      const d = await api('models');
+      mgFillModels(d.models || []);
+    } catch (e) {
+      mgModelsErr = e.message || '读取失败';
+      mgModelsLoading = null;
+      // 只更新候选列表，不走整体重渲染（重渲染会再次触发本函数，且会覆盖用户正在输入的表单）
+      if (mgGroups.length) renderMGAddPicker();
+      return;
+    }
+    mgModelsLoading = null;
+    // 目录到手后只刷新候选列表 —— 不调 renderMGEditor：
+    // 那会用 mgGroups 的值重写 mgID/mgName，把用户正在编辑但未提交的内容冲掉。
+    if (mgGroups.length) renderMGAddPicker();
+  })();
+  return mgModelsLoading;
+}
+
+/* loadModelGroups 重新拉取组配置并渲染。
+   keepCur 为 true 时保留当前选中下标（用于「丢弃未保存修改」后的原地刷新）；
+   否则回到第 0 组（首次加载）。 */
+async function loadModelGroups(keepCur) {
+  const prev = mgCur;
+  const box = $('mgList');
+  box.innerHTML = '<div class="empty">正在读取…</div>';
+  try {
+    const d = await api('model_groups');
+    mgGroups = (d.groups || []).map(g => ({
+      id: g.id, name: g.name, enabled: !!g.enabled,
+      members: (g.members || []).map(m => ({
+        model: m.model, realm: m.realm, bare: m.bare, weight: m.weight,
+        enabled: !!m.enabled, window: m.window || '',
+        // 字段名与后端一致：state 三态来自 pool.ModelLockView()（与账号池锁池表同源），
+        // probed_at 来自 Cache（仅 tooltip 用，不影响状态判定）
+        _st: {
+          state: m.state || '', servable: m.servable || 0, total: m.total || 0,
+          locked: m.locked || 0, reason: m.reason || '',
+          unlockAt: m.unlock_at || '', probedAt: m.probed_at || '',
+          // kind / canSniff 来自 Cache（后端判定）：只有 model_rate 值得真探活，
+          // model_missing / hard_credit 探了也必然失败。前端不自己猜，避免与后端漂移。
+          kind: m.kind || '', canSniff: !!m.can_sniff
+        }
+      }))
+    }));
+    if (d.options) mgOpts = d.options;
+    // keepCur：保留原下标（丢弃修改后原地刷新）；越界则回 0
+    mgCur = keepCur ? Math.min(prev, Math.max(0, mgGroups.length - 1)) : 0;
+    mgDirty = false; mgOpenWin = -1;
+    renderModelGroups();
+  } catch (e) {
+    box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+    // 必须抛出：调用方（刷新按钮/丢弃后重载）要据此区分「刷新成功」与「读取失败」，
+    // 吞掉异常会让按钮在接口 500 时仍提示「已刷新」。
+    throw e;
+  }
+  // 候选目录为空时补拉（不 await，避免拖慢首屏渲染）
+  mgEnsureModels();
+}
+
+function renderModelGroups() {
+  const tb = $('mgList');
+  $('mgNote').textContent = mgGroups.length + ' 个组 · ' + mgGroups.filter(g => g.enabled).length + ' 个启用';
+  if (!mgGroups.length) {
+    tb.innerHTML = '<div class="empty"><div class="big">还没有模型组</div>点「+ 新建」创建一个，客户端用 group:&lt;id&gt; 点名</div>';
+    // ⚠ 不能清空 mgBody：编辑器字段（mgID/mgName/...）是 index.html 里的静态结构，
+    // 一旦被 innerHTML='' 删掉，后续 renderMGEditor 取不到元素会抛异常，
+    // 表现为「新建组后表单空白、添加成员下拉无选项」。
+    // 这里只清空动态区域，并把静态字段复位成「无选中组」的禁用态。
+    mgEditorIdle();
+    $('mgMembers').innerHTML = '';
+    renderMGLocks();
+    return;
+  }
+  // 组列表
+  tb.innerHTML = mgGroups.map((g, i) => {
+    const vis = g.members.filter(m => m.enabled && inWin(m.window));
+    const top = vis[0];
+    const hidden = g.members.length - vis.length;
+    const av = top ? availOfMG(top) : { cls: 'mute', label: '—', tip: '' };
+    return '<div class="mgitem' + (i === mgCur ? ' on' : '') + '" data-i="' + i + '">' +
+      '<span class="dot ' + av.cls + '" style="margin-top:5px"></span>' +
+      '<div style="min-width:0">' +
+        '<div class="mgname">' + esc(g.name || '(未命名)') + '</div>' +
+        '<div class="mgmeta">' + (top ? esc(top.model) : '无可见成员') + '</div>' +
+        '<div class="mgmeta">' + g.members.length + ' 成员' + (hidden ? ' · ' + hidden + ' 不可见' : '') + (g.enabled ? '' : ' · 已停用') + '</div>' +
+      '</div>' +
+      '<div class="mgright">' + (g.enabled ? '<span class="tag ok" style="font-size:10.5px">启用</span>' : '<span class="tag mute" style="font-size:10.5px">停用</span>') + '</div>' +
+    '</div>';
+  }).join('');
+  tb.querySelectorAll('.mgitem').forEach(el => {
+    el.onclick = () => {
+      const target = Number(el.dataset.i);
+      if (mgDirty) {
+        if (!confirm('当前组有未保存的修改，切换将丢弃。继续？')) return;
+        // 必须真的回滚：confirm 承诺「丢弃」，若只改 mgCur 而不复原，
+        // 改动会留在内存里，用户下次点保存就把「以为已放弃」的修改写进配置。
+        // 重新拉取是最省事也最可靠的复原方式（唯一事实来源是服务端）。
+        mgDirty = false; mgCur = target; mgOpenWin = -1;
+        // 失败时列表区已显示错误文案，吞掉异常避免未处理的 Promise 拒绝。
+        loadModelGroups(true).catch(() => {}); // true = 保留刚设的 target 下标
+        return;
+      }
+      mgCur = target; mgOpenWin = -1; renderModelGroups();
+    };
+  });
+
+  renderMGEditor();
+  renderMGMembers();
+  renderMGLocks();
+}
+
+/* collectVisibleLocks 当前「可见且被引用」的成员集合（去重）。
+ *
+ * 只取「启用组 + 成员未停用 + 在生效时段内」：停用与时段外的成员不参与选号，
+ * 也不参与嗅探（探活了也用不上，纯消耗额度），列出来只会干扰判断。
+ * 去重是因为同一 (域, 裸名) 可能被多个组引用，而锁状态是全局的，只该出现一次。
+ */
+function collectVisibleLocks() {
+  const seen = new Set();
+  const rows = [];
+  mgGroups.filter(g => g.enabled).forEach(g => {
+    g.members.filter(m => m.enabled && inWin(m.window)).forEach(m => {
+      const key = m.realm + ':' + m.bare;
+      if (seen.has(key)) return;
+      seen.add(key);
+      rows.push(m);
+    });
+  });
+  return rows;
+}
+
+/* renderMGLocks 渲染「模型锁状态」表（与账号池「模型锁池」同源）。
+ *
+ * 只列「启用组 + 成员未停用 + 在生效时段内」的成员：停用与时段外的成员不参与选号，
+ * 也不参与嗅探（探活了也用不上，纯消耗额度），列出来只会干扰判断。
+ *
+ * 状态口径与上方成员行完全一致（都来自后端 ModelLockView），
+ * 区别是本表把「锁因 / 最早解锁 / 上次探活 / 能否嗅探」摊开展示，便于运维决策。
+ */
+function renderMGLocks() {
+  const tb = $('mgLockBody');
+  if (!tb) return;
+  const rows = collectVisibleLocks();
+
+  const note = $('mgLockNote');
+  if (note) note.textContent = rows.length + ' 条 · 只列可见成员';
+
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">当前没有可见成员：检查组是否启用、成员是否停用或处于时段外</div></td></tr>';
+    return;
+  }
+
+  tb.innerHTML = rows.map(m => {
+    const st = m._st || {};
+    const av = availOfMG(m);
+    // 一律显示真实数字（servable/total），不再用「全部」占位：
+    // 「全部/全部」既看不出到底几个号，也会把「域内 0 个可路由账号」伪装成满血可用。
+    // 无锁行时后端已现算出该域的可路由账号数（total）与 healthy 数（servable）。
+    const svc = (st.state ? st.servable : (st.servable || 0)) + '/' + (st.total || 0) +
+      (st.locked ? ' <span style="color:var(--ink-3)">(锁 ' + st.locked + ')</span>' : '');
+    // 能否嗅探由后端判定（can_sniff = 不可用 且 锁因是 model_rate）。
+    // 前端不自己猜锁因，避免与后端 RunOnce 的过滤条件漂移。
+    const canSniff = !!st.canSniff;
+    return '<tr>' +
+      '<td><span class="mgwho">' + esc(m.model) + '</span>' +
+        '<div class="mgwho-sub">' + (m.realm === 'global' ? '国际版' : '国内版') + '</div></td>' +
+      '<td><span class="tag ok" style="font-size:10.5px">可见</span></td>' +
+      '<td><span class="tag ' + av.cls + '" title="' + esc(av.tip) + '" style="font-size:10.5px">' + esc(av.label) + '</span></td>' +
+      '<td class="mono">' + svc + '</td>' +
+      '<td class="mgwhy">' + esc(st.reason || '—') + '</td>' +
+      '<td class="mono">' + (st.unlockAt ? fmtLocalDateTime(st.unlockAt) : '—') + '</td>' +
+      '<td class="mono">' + (st.probedAt ? fmtLocalDateTime(st.probedAt) : '—') + '</td>' +
+      '<td style="width:1px;white-space:nowrap">' +
+        (canSniff
+          ? '<button class="xs ghost" data-mgsniff="' + esc(m.realm + ':' + m.bare) + '" title="按该域账号逐个发 1-token 探活">嗅探</button>'
+          : '<span class="note" style="font-size:11px">' + (st.state && st.state !== 'partial' ? '等 TTL' : '—') + '</span>') +
+      '</td>' +
+    '</tr>';
+  }).join('');
+
+  tb.querySelectorAll('[data-mgsniff]').forEach(b => {
+    b.onclick = () => mgSniffOne(b.dataset.mgsniff, b);
+  });
+}
+
+/* mgSniffOne 对单个成员触发嗅探。
+ *
+ * 后端只有「跑一轮」的接口（RunOnceNow 会自己按可见性/锁因/频率过滤候选），
+ * 所以这里传入目标后仍可能探 0 次（例如刚探过、被 sniff_min_gap 拦下）。
+ * 不为此再加一个「只探某个成员」的接口：那会绕开频率护栏，
+ * 等于把防打爆上游的保护拆掉一个口子。
+ */
+async function mgSniffOne(model, btn) {
+  const m = mgGroups.flatMap(g => g.members).find(x => (x.realm + ':' + x.bare) === model);
+  if (!m) return;
+  const gapMs = parseDurMs(mgOpts.sniff_min_gap);
+  const last = m._st && m._st.probedAt ? new Date(m._st.probedAt).getTime() : 0;
+  if (last && Date.now() - last < gapMs) {
+    toast('距上次探活不足 ' + mgOpts.sniff_min_gap + '（sniff_min_gap），本次跳过', 'warn');
+    return;
+  }
+  await mgSniffAll(btn, model);
+}
+
+/* mgSniffAll 调后端跑一轮嗅探。scope 仅用于按钮态与提示文案（后端仍探整轮）。 */
+async function mgSniffAll(btn, scope) {
+  const all = $('mgSniffAllBtn');
+  const label = btn ? btn.textContent : all.textContent;
+  [btn, all].filter(Boolean).forEach(b => { b.disabled = true; b.textContent = '探测中…'; });
+  try {
+    const d = await api('model_groups/sniff', { method: 'POST' });
+    const probed = d.probed || 0;
+    const recovered = d.recovered || 0;
+    if (recovered > 0) {
+      toast('嗅探完成：探活 ' + probed + ' 个，' + recovered + ' 个已提前恢复');
+    } else if (probed > 0) {
+      toast('嗅探完成：探活 ' + probed + ' 个，均仍被锁，按原墙钟继续等待', 'warn');
+    } else {
+      // 探 0 次有三种成因，文案必须说清是哪一种，否则用户会误以为有锁却没探：
+      //  ① 当前根本没有锁定成员（最常见）—— 不是失败，无需处理
+      //  ② 有锁定成员但锁因不是 model_rate（model_missing/hard_credit）—— 探了也没用
+      //  ③ 锁因是 model_rate 但被频率上限或剩余冷却下限拦下 —— 等一会儿再点
+      const locked = collectVisibleLocks().filter(m => m._st && m._st.state && m._st.state !== 'partial');
+      if (!locked.length) {
+        toast('当前没有锁定的成员，无需嗅探');
+      } else if (!locked.some(m => m._st.canSniff)) {
+        toast('锁定的成员锁因不是额度窗口（结构性缺失/余额耗尽），探活也不会恢复，等 TTL 即可', 'warn');
+      } else {
+        toast('本轮没有真正探活：可能在 sniff_min_gap 内或剩余冷却过短，稍后再试', 'warn');
+      }
+    }
+    await loadModelGroups(true);
+  } catch (e) {
+    toast('嗅探失败：' + e.message, 'err');
+  } finally {
+    [btn, all].filter(Boolean).forEach(b => { b.disabled = false; b.textContent = b === btn ? label : '立即嗅探全部'; });
+  }
+}
+
+/* mgRefreshLocks 重新读取锁状态（不触发探活）。
+ *
+ * 与「立即嗅探全部」的区别必须清楚：
+ *   - 嗅探 = 真的去上游探活，会消耗额度，有频率上限
+ *   - 刷新 = 只重读后端现算的状态（ModelLockView + Cache 的探活时刻），零上游调用
+ * 所以这个按钮可以随便点，不会打上游。
+ *
+ * 用 loadModelGroups(true) 而不是只调 renderMGLocks()：锁表状态挂在 mgGroups[].members[]._st 上，
+ * 只重渲染会拿旧数据，等于什么都没刷新。
+ */
+async function mgRefreshLocks(btn) {
+  const b = btn || $('mgLockRefreshBtn');
+  const label = b ? b.textContent : '';
+  if (b) { b.disabled = true; b.textContent = '刷新中…'; }
+  try {
+    await loadModelGroups(true); // true = 保留当前选中组
+    toast('锁状态已刷新');
+  } catch (e) {
+    toast('刷新失败：' + e.message, 'err');
+  } finally {
+    if (b) { b.disabled = false; b.textContent = label; }
+  }
+}
+
+/* parseDurMs 把 Go 风格的时长串（"10m0s"）转成毫秒，仅用于前端频率提示。
+   解析失败返回 0（不做本地拦截，交给后端判定）。 */
+function parseDurMs(s) {
+  if (!s) return 0;
+  const re = /(\d+(?:\.\d+)?)(h|m|s|ms)/g;
+  let total = 0, hit = false, mt;
+  while ((mt = re.exec(String(s))) !== null) {
+    hit = true;
+    const v = parseFloat(mt[1]);
+    total += mt[2] === 'h' ? v * 3600e3 : mt[2] === 'm' ? v * 60e3 : mt[2] === 'ms' ? v : v * 1e3;
+  }
+  return hit ? total : 0;
+}
+
+/* mgEditorIdle 无选中组时把编辑器复位成禁用态。
+   字段是静态 HTML，只改值/disabled，不删节点（删了之后 renderMGEditor 会抛异常）。 */
+function mgEditorIdle() {
+  $('mgTitle').textContent = '编辑组';
+  $('mgStateTag').textContent = '—';
+  $('mgStateTag').className = 'tag mute';
+  $('mgSwitchNote').textContent = '先在左侧选择或新建一个组';
+  $('mgID').value = '';
+  $('mgName').value = '';
+  $('mgEnabled').checked = false;
+  $('mgPrefer').checked = !!mgOpts.prefer_last_ok;
+  $('mgSniff').checked = !!mgOpts.sniff_enabled;
+  ['mgID', 'mgName', 'mgEnabled', 'mgPrefer', 'mgSniff'].forEach(id => { $(id).disabled = true; });
+  if ($('mgAddQ')) { $('mgAddQ').value = ''; $('mgAddQ').disabled = true; }
+  $('mgAddSel').innerHTML = '<option value="">（未选择组）</option>';
+  $('mgAddSel').disabled = true;
+  $('mgAddBtn').disabled = true;
+  const note = $('mgAddNote');
+  if (note) note.textContent = '';
+  $('mgSaveBtn').disabled = true;
+  $('mgDelBtn').disabled = true;
+  $('mgSniffNote').innerHTML = '';
+  $('mgFootNote').textContent = '';
+}
+
+function renderMGEditor() {
+  const g = mgGroups[mgCur];
+  if (!g) return;
+  // 静态字段缺失说明 DOM 结构异常（历史上曾被 innerHTML='' 删掉过）。
+  // 直接跳过而不是抛异常：抛异常会中断后续的下拉渲染，症状比缺字段严重得多。
+  if (!$('mgID') || !$('mgName')) {
+    console.warn('[modelgroups] 编辑器字段缺失，跳过渲染（index.html 静态结构被破坏）');
+    return;
+  }
+  // 从空态回到有组：静态字段可能还停在 disabled
+  ['mgID', 'mgName', 'mgEnabled', 'mgPrefer', 'mgSniff', 'mgAddQ'].forEach(id => { $(id).disabled = false; });
+  $('mgSaveBtn').disabled = false;
+  $('mgDelBtn').disabled = false;
+  $('mgTitle').textContent = '编辑：' + (g.name || '(未命名)');
+  $('mgStateTag').textContent = g.enabled ? '启用' : '停用';
+  $('mgStateTag').className = 'tag ' + (g.enabled ? 'ok' : 'mute');
+  $('mgSwitchNote').textContent = g.enabled ? '客户端可点名 group:' + g.id : '停用后点名返回 400';
+
+  // 字段是静态 HTML（见 index.html 的注释），这里只填值 —— 不拼 innerHTML，
+  // 否则 frontend_test 的「app.js 引用的 id 必须在 HTML 里存在」护栏会失效。
+  $('mgID').value = g.id;
+  $('mgName').value = g.name;
+  $('mgEnabled').checked = !!g.enabled;
+  $('mgPrefer').checked = !!mgOpts.prefer_last_ok;
+  $('mgSniff').checked = !!mgOpts.sniff_enabled;
+  $('mgSniffNote').innerHTML =
+    '嗅探参数（全局）：周期 <span class="mono">' + esc(mgOpts.sniff_interval) + '</span> · ' +
+    '剩余冷却 ≥ <span class="mono">' + esc(mgOpts.sniff_min_until) + '</span> 才真探 · ' +
+    '同成员最小间隔 <span class="mono">' + esc(mgOpts.sniff_min_gap) + '</span>';
+
+  $('mgID').oninput = e => { g.id = e.target.value.trim().toLowerCase(); mgDirty = true; mgFootNote(); };
+  $('mgName').oninput = e => { g.name = e.target.value; mgDirty = true; mgFootNote(); };
+  $('mgEnabled').onchange = e => { g.enabled = e.target.checked; mgDirty = true; renderModelGroups(); };
+  $('mgPrefer').onchange = e => { mgOpts.prefer_last_ok = e.target.checked; mgDirty = true; mgFootNote(); };
+  $('mgSniff').onchange = e => { mgOpts.sniff_enabled = e.target.checked; mgDirty = true; mgFootNote(); };
+
+  mgFootNote();
+
+  renderMGAddPicker();
+}
+
+/* mgAddQuery 当前「添加成员」搜索词（小写，已 trim）。 */
+function mgAddQuery() {
+  return ($('mgAddQ') ? $('mgAddQ').value : '').trim().toLowerCase();
+}
+
+/* renderMGAddPicker 渲染「可添加成员」候选列表。
+   目录有 80+ 个模型，单行下拉只能盲选 —— 支持搜索过滤，命中项按域分组展示。
+   三种空态必须分开说，否则「目录还没拉到」会被误读成「模型都用完了」。 */
+function renderMGAddPicker() {
+  const g = mgGroups[mgCur];
+  const sel = $('mgAddSel');
+  if (!g || !sel) return;
+  const q = mgAddQuery();
+  const used = new Set(g.members.map(m => m.model));
+  // 排除已在组内的；搜索词按子串匹配整名（含 cn:/global: 前缀，用户能直接打 global: 筛域）
+  const avail = (mgAllModels || []).filter(m => !used.has(m))
+    .filter(m => !q || m.toLowerCase().includes(q));
+  const allFree = (mgAllModels || []).filter(m => !used.has(m));
+
+  // 分支顺序：有候选 → 目录本身的问题（空/失败）→ 候选耗尽 → 搜索无命中。
+  // 目录类问题必须先于「搜索无命中」判断，否则用户会看到「没有匹配」而不是真正原因；
+  // 反过来也不能让目录错误盖住「有候选但没搜到」—— 那时目录是好的。
+  if (avail.length) {
+    sel.innerHTML = avail.map(m => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('');
+    sel.disabled = false;
+  } else if (!mgAllModels.length && mgModelsErr) {
+    sel.innerHTML = '<option value="">模型目录读取失败：' + esc(mgModelsErr) + '</option>';
+    sel.disabled = true;
+  } else if (!mgAllModels.length) {
+    sel.innerHTML = '<option value="">正在读取模型目录…</option>';
+    sel.disabled = true;
+    // 目录为空就补拉一次（首次直接进本页时 mgAllModels 还是空的）
+    mgEnsureModels();
+  } else if (!allFree.length) {
+    sel.innerHTML = '<option value="">（模型目录中的模型都已在组内）</option>';
+    sel.disabled = true;
+  } else {
+    // 有候选但搜索无命中
+    sel.innerHTML = '<option value="">没有匹配「' + esc(q) + '」的模型</option>';
+    sel.disabled = true;
+  }
+  $('mgAddBtn').disabled = !avail.length;
+
+  // 计数提示：让用户知道过滤掉了多少，避免以为目录变小了。
+  // 节点是静态 HTML（见 index.html）—— 动态 createElement 会绕过
+  // 「app.js 引用的 id 必须在 index.html 存在」的护栏（TestAppJSIdsExistInHTML）。
+  const note = $('mgAddNote');
+  if (note) {
+    note.textContent = q
+      ? '匹配 ' + avail.length + ' / ' + allFree.length + ' 个可添加模型'
+      : allFree.length + ' 个模型可添加（共 ' + (mgAllModels || []).length + ' 个）';
+  }
+}
+
+function mgFootNote() {
+  $('mgFootNote').textContent = mgDirty ? '有未保存的修改' : '已保存';
+  $('mgFootNote').style.color = mgDirty ? 'var(--warn)' : 'var(--ink-3)';
+}
+
+/* availOfMG 成员可用性标签。
+   状态来自后端 pool.ModelLockView()（与账号池「模型锁池」表同源），
+   直接复用已有的 ML_STATE 映射表，不新造词（设计文档 §13.5）。
+   优先级：已停用 > 时段外 > 锁状态。 */
+function availOfMG(m) {
+  if (!m.enabled) return { cls: 'mute', label: '已停用', tip: '成员被显式停用，直接跳过（不选号、不嗅探）' };
+  if (!inWin(m.window)) {
+    const ns = nextSwitch(m.window);
+    return { cls: 'mute', label: '时段外', tip: '不在生效时间段内' + (ns ? '，' + ns.at + ' ' + ns.kind : '') };
+  }
+  const st = m._st;
+  if (!st || !st.state) {
+    // 未锁不等于可用：域内可能一个可路由账号都没有（全被停用/暂停选号）。
+    // total=0 时必须显示「无可用账号」，否则「0 个号」会被渲染成「全部」，
+    // 让用户以为该成员随时能服务。
+    const total = st && st.total ? st.total : 0;
+    if (!total) {
+      return { cls: 'warn', label: '无可用账号', tip: '该域没有可路由账号（全部被停用或暂停选号），选号必然失败' };
+    }
+    return { cls: 'ok', label: '可用', tip: '该模型未被锁（' + total + ' 个账号可服务）' };
+  }
+  const pair = ML_STATE[st.state] || ['mute', st.state];
+  const tip = pair[1] + '：' + st.servable + '/' + st.total + ' 账号可服务'
+    + (st.locked ? '，' + st.locked + ' 个号被这个模型锁住' : '')
+    + (st.unlockAt ? '，最早 ' + fmtLocalDateTime(st.unlockAt) + ' 解锁' : '')
+    + (st.probedAt ? '，上次探活 ' + fmtLocalDateTime(st.probedAt) : '')
+    + (st.reason ? '；' + st.reason : '');
+  // partial 时「还有号能服务」是可用态：只剩 1 个号时降级为 warn
+  if (st.state === 'partial') {
+    return { cls: st.servable >= 2 ? 'ok' : 'warn', label: st.servable >= 2 ? '可用' : '部分可用', tip };
+  }
+  return { cls: pair[0], label: pair[1], tip };
+}
+
+function renderMGMembers() {
+  const g = mgGroups[mgCur];
+  if (!g) return;
+  const vis = g.members.filter(m => m.enabled && inWin(m.window));
+  const hidden = g.members.length - vis.length;
+  $('mgMemNote').textContent = g.members.length + ' 成员' + (hidden ? ' · ' + hidden + ' 不可见（停用/时段外）' : '');
+  $('mgMemNote').style.color = g.members.length > 5 ? 'var(--warn)' : 'var(--ink-3)';
+
+  $('mgMembers').innerHTML = g.members.map((m, i) => {
+    const off = !m.enabled;
+    const outWin = m.enabled && !inWin(m.window);
+    const p = parseWin(m.window);
+    const av = availOfMG(m);
+    const st = m._st || {};
+    const realmTag = m.realm === 'global'
+      ? '<span class="tag mute" style="font-size:10px">国际版</span>'
+      : '<span class="tag mute" style="font-size:10px">国内版</span>';
+    const winTag = m.window
+      ? '<span class="tag ' + (p && p.cross ? 'warn' : 'mute') + '" style="font-size:10px">' + esc(m.window) + (p && p.cross ? ' 跨天' : '') + '</span>'
+      : '';
+    let sub;
+    if (off) sub = '<span class="tag mute" style="font-size:10px">已停用</span> 直接跳过';
+    else if (outWin) {
+      const ns = nextSwitch(m.window);
+      sub = '<span class="tag mute" style="font-size:10px">时段外</span> ' + (ns ? esc(ns.at) + ' ' + esc(ns.kind) : '');
+    } else if (!st.state) {
+      // 未锁也要区分「有号」与「无号」：total=0 说明该域没有可路由账号
+      // （全被停用或暂停选号），此时说「0 个账号可服务」才是真话。
+      sub = st.total
+        ? '<span class="dot ok"></span><span>' + st.total + ' 个账号可服务（该模型未被锁）</span>'
+        : '<span class="dot warn"></span><span>该域没有可路由账号（全部被停用或暂停选号）</span>';
+    } else {
+      sub = '<span class="dot ' + av.cls + '"></span><span>' +
+        (st.servable > 0
+          ? st.servable + '/' + st.total + ' 账号可服务'
+          : esc(av.label) + (st.unlockAt ? ' · ' + fmtLocalDateTime(st.unlockAt) + ' 解锁' : '')) + '</span>';
+      if (st.locked > 0) sub += '<span style="color:var(--ink-3)">该模型锁 ' + st.locked + ' 个号</span>';
+      if (st.probedAt) sub += '<span style="color:var(--ink-3)">嗅探 ' + fmtLocalDateTime(st.probedAt) + ' 确认仍锁</span>';
+    }
+    const rank = vis.findIndex(x => x.model === m.model);
+    const idxTxt = rank >= 0 ? String(rank + 1) : '—';
+    const winOpen = mgOpenWin === i;
+    return '<div class="mgrow' + (off ? ' off' : '') + '" draggable="true" data-i="' + i + '">' +
+      '<span class="mgidx">' + idxTxt + '</span>' +
+      '<span class="mglead">' +
+        '<span class="mggrip" title="拖动排序"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="6" cy="4" r="1.3"/><circle cx="10" cy="4" r="1.3"/><circle cx="6" cy="8" r="1.3"/><circle cx="10" cy="8" r="1.3"/><circle cx="6" cy="12" r="1.3"/><circle cx="10" cy="12" r="1.3"/></svg></span>' +
+        '<input type="checkbox" data-mgen="' + i + '"' + (m.enabled ? ' checked' : '') + ' title="启用/停用该成员" aria-label="启用该成员">' +
+      '</span>' +
+      '<div class="mgmid">' +
+        '<div class="mgmodel">' + esc(m.model) + '</div>' +
+        '<div class="mgsub">' + realmTag + winTag + sub + '</div>' +
+      '</div>' +
+      '<div class="mgw">' +
+        '<input type="number" min="1" max="1000" value="' + m.weight + '" data-mgw="' + i + '" title="权重越大越优先">' +
+        (m._hand ? '<span class="mghand" title="手动改过：拖拽重排时不会被自动覆盖">手改</span>' : '') +
+      '</div>' +
+      '<div class="mgacts">' +
+        '<span class="tag ' + av.cls + '" title="' + esc(av.tip) + '" style="font-size:10px">' + esc(av.label) + '</span>' +
+        '<button class="xs ghost" data-mgwin="' + i + '" title="配置生效时间段">时段</button>' +
+        '<button class="xs ghost" data-mgup="' + i + '" title="上移"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+        '<button class="xs ghost" data-mgdown="' + i + '" title="下移"' + (i === g.members.length - 1 ? ' disabled' : '') + '>↓</button>' +
+        '<button class="xs ghost danger" data-mgdel="' + i + '" title="移除">✕</button>' +
+      '</div>' +
+    '</div>' +
+    (winOpen ? mgWinRow(m, i) : '');
+  }).join('');
+
+  // 启用开关
+  $('mgMembers').querySelectorAll('[data-mgen]').forEach(cb => {
+    cb.onchange = e => {
+      const i = Number(e.target.dataset.mgen);
+      mgGroups[mgCur].members[i].enabled = e.target.checked;
+      mgDirty = true; renderModelGroups();
+    };
+  });
+  // 权重
+  $('mgMembers').querySelectorAll('[data-mgw]').forEach(inp => {
+    inp.onchange = e => {
+      const i = Number(e.target.dataset.mgw);
+      const v = Math.max(1, Math.min(1000, Number(e.target.value) || 1));
+      const m = mgGroups[mgCur].members[i];
+      m.weight = v; m._hand = true;
+      mgDirty = true; renderMGMembers();
+    };
+  });
+  // 时段展开
+  $('mgMembers').querySelectorAll('[data-mgwin]').forEach(b => {
+    b.onclick = () => {
+      const i = Number(b.dataset.mgwin);
+      mgOpenWin = mgOpenWin === i ? -1 : i;
+      renderMGMembers();
+    };
+  });
+  // 时段输入
+  $('mgMembers').querySelectorAll('[data-mgws]').forEach(inp => {
+    inp.onchange = e => {
+      const i = Number(e.target.dataset.mgws);
+      const s = $('mgws-' + i).value, en = $('mgwe-' + i).value;
+      mgGroups[mgCur].members[i].window = (s && en) ? (s + '-' + en) : '';
+      mgDirty = true; renderModelGroups();
+    };
+  });
+  // 时段预设
+  $('mgMembers').querySelectorAll('[data-mgpreset]').forEach(b => {
+    b.onclick = () => {
+      const i = Number(b.dataset.pi);
+      const v = b.dataset.mgpreset;
+      mgGroups[mgCur].members[i].window = (v === 'off') ? '' : v;
+      mgDirty = true; renderModelGroups();
+    };
+  });
+  $('mgMembers').querySelectorAll('[data-mgup]').forEach(b => b.onclick = () => mgMove(Number(b.dataset.mgup), -1));
+  $('mgMembers').querySelectorAll('[data-mgdown]').forEach(b => b.onclick = () => mgMove(Number(b.dataset.mgdown), +1));
+  $('mgMembers').querySelectorAll('[data-mgdel]').forEach(b => {
+    b.onclick = () => { mgGroups[mgCur].members.splice(Number(b.dataset.mgdel), 1); mgDirty = true; renderModelGroups(); };
+  });
+  mgWireDrag();
+}
+
+function mgWinRow(m, i) {
+  const p = parseWin(m.window);
+  const f = v => String(Math.floor(v / 60)).padStart(2, '0') + ':' + String(v % 60).padStart(2, '0');
+  const s = p ? f(p.s) : '';
+  const e = p ? f(p.e) : '';
+  const crossNote = p && p.cross ? '<span class="tag warn" style="font-size:10px">跨天</span> 23:00-07:00 表示 23:00 至次日 07:00' : '';
+  const ns = p ? nextSwitch(m.window) : null;
+  return '<div class="mgwin">' +
+    '<div class="row">' +
+      '<input type="time" id="mgws-' + i + '" data-mgws="' + i + '" value="' + s + '" aria-label="生效开始">' +
+      '<span class="note">至</span>' +
+      '<input type="time" id="mgwe-' + i + '" data-mgws="' + i + '" value="' + e + '" aria-label="生效结束">' +
+      crossNote +
+    '</div>' +
+    '<div class="presets">' +
+      '<button class="xs ghost" data-mgpreset="off" data-pi="' + i + '">全天（清空）</button>' +
+      '<button class="xs ghost" data-mgpreset="09:00-23:00" data-pi="' + i + '">白天 09:00-23:00</button>' +
+      '<button class="xs ghost" data-mgpreset="23:00-07:00" data-pi="' + i + '">夜间 23:00-07:00</button>' +
+    '</div>' +
+    '<div class="note">留空 = 全天生效；支持跨天（开始 &gt; 结束）。按 CST 判定，左闭右开。' +
+      (ns ? ' 当前：' + (inWin(m.window) ? '在时段内，' + esc(ns.at) + ' 结束' : '时段外，' + esc(ns.at) + ' 生效') : '') +
+    '</div>' +
+  '</div>';
+}
+
+function mgMove(i, d) {
+  const g = mgGroups[mgCur], j = i + d;
+  if (j < 0 || j >= g.members.length) return;
+  const t = g.members[i]; g.members[i] = g.members[j]; g.members[j] = t;
+  mgAutoWeights(g);
+  mgDirty = true; renderMGMembers();
+}
+
+/* 拖拽顺序即优先级：未被手改的行按位置重算 100/90/80…；手改行保持原值。 */
+function mgAutoWeights(g) {
+  g.members.forEach((m, i) => { if (!m._hand) m.weight = Math.max(1, 100 - i * 10); });
+}
+
+function mgWireDrag() {
+  let dragI = null;
+  $('mgMembers').querySelectorAll('.mgrow').forEach(row => {
+    row.ondragstart = e => {
+      dragI = Number(row.dataset.i);
+      row.classList.add('drag');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(dragI));
+    };
+    row.ondragend = () => row.classList.remove('drag');
+    row.ondragover = e => { e.preventDefault(); row.classList.add('over'); };
+    row.ondragleave = () => row.classList.remove('over');
+    row.ondrop = e => {
+      e.preventDefault();
+      row.classList.remove('over');
+      const to = Number(row.dataset.i);
+      if (dragI == null || dragI === to) return;
+      const g = mgGroups[mgCur];
+      const moved = g.members.splice(dragI, 1)[0];
+      g.members.splice(to, 0, moved);
+      mgAutoWeights(g);
+      mgDirty = true;
+      renderMGMembers();
+    };
+  });
+}
+
+/* 事件绑定（文件末尾，元素此时一定已解析） */
+/* 立即嗅探全部：跑一轮与定时嗅探相同的逻辑。
+   语义是「尽力而为的一轮」，不是强制探活 —— 刚探过的会被频率上限跳过，
+   所以按钮回执必须区分「探了但没恢复」与「本轮没有需要探的」，不能都报失败。 */
+$('mgSniffAllBtn').onclick = () => mgSniffAll(null, null);
+/* 刷新列表：只重读状态，不探活（零上游调用，可随意点）。 */
+$('mgLockRefreshBtn').onclick = () => mgRefreshLocks(null);
+
+$('mgNewBtn').onclick = () => {
+  const n = mgGroups.length + 1;
+  mgGroups.push({ id: 'group' + n, name: '新模型组 ' + n, enabled: false, members: [] });
+  mgCur = mgGroups.length - 1; mgDirty = true; mgOpenWin = -1;
+  renderModelGroups();
+};
+/* 搜索框：输入即筛（120ms 防抖，与「模型与档位」页 mdQ 同口径）。
+   连续添加时不必每敲一次就重排 80 项。 */
+let mgAddQTimer = null;
+function mgAddQSearch() {
+  clearTimeout(mgAddQTimer);
+  mgAddQTimer = setTimeout(renderMGAddPicker, 120);
+}
+$('mgAddQ').oninput = mgAddQSearch;
+/* 移动端兜底：部分手机浏览器 / 输入法只在 change、search（点 ✕ 或回车清空）或
+   compositionend（中文组合输入结束）时派发事件，只挂 oninput 会让搜索框在手机上
+   「输入无反应」（用户实测反馈）。input 仍是主路径，这里只补遗漏的事件源，
+   重复触发由上面的 120ms 防抖收敛。
+   用 onXxx 属性而非 addEventListener：与全文件既有写法一致。 */
+$('mgAddQ').onchange = mgAddQSearch;
+$('mgAddQ').onsearch = mgAddQSearch;
+$('mgAddQ').oncompositionend = mgAddQSearch;
+// Esc 清空搜索；Enter 直接添加当前选中项（不用再去点按钮）
+$('mgAddQ').onkeydown = e => {
+  if (e.key === 'Escape') { e.target.value = ''; renderMGAddPicker(); }
+  if (e.key === 'Enter') { e.preventDefault(); $('mgAddBtn').click(); }
+};
+$('mgAddSel').onkeydown = e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('mgAddBtn').click(); }
+};
+
+$('mgAddBtn').onclick = () => {
+  const sel = $('mgAddSel');
+  const model = sel.value;
+  if (!model) return;
+  const g = mgGroups[mgCur];
+  const realm = model.startsWith('global:') ? 'global' : 'cn';
+  g.members.push({
+    model: model, realm: realm, bare: model.replace(/^(cn|global):/, ''),
+    weight: Math.max(1, 100 - g.members.length * 10), enabled: true, window: '', _st: null
+  });
+  mgAutoWeights(g);
+  mgDirty = true;
+  // 连续添加同一个模型的前缀时，保留搜索词、把焦点留在列表上，
+  // 这样能直接用方向键+Enter 接着加，不必重新输入。
+  renderModelGroups();
+  const q = mgAddQuery();
+  if (q && $('mgAddSel').options.length) $('mgAddSel').focus();
+};
+$('mgDelBtn').onclick = () => {
+  const g = mgGroups[mgCur];
+  if (!g || !confirm('删除组「' + (g.name || g.id) + '」？已点名的客户端会返回 400。')) return;
+  mgGroups.splice(mgCur, 1);
+  mgCur = Math.max(0, mgCur - 1); mgDirty = true; mgOpenWin = -1;
+  renderModelGroups();
+};
+$('mgSaveBtn').onclick = async () => {
+  const g = mgGroups[mgCur];
+  if (!g) return;
+  if (!g.id) { toast('组 ID 不能为空', 'err'); return; }
+  if (mgGroups.filter(x => x.id === g.id).length > 1) { toast('组 ID 重复：' + g.id, 'err'); return; }
+  if (!g.members.length) { toast('至少需要 1 个成员', 'err'); return; }
+  if (!g.members.filter(m => m.enabled && inWin(m.window)).length) {
+    toast('该组当前没有可见成员（全部停用或在时段外），保存后点名会返回 model_unavailable', 'warn');
+  }
+  const payload = {
+    groups: mgGroups.map(x => ({
+      id: x.id, name: x.name, enabled: !!x.enabled,
+      members: x.members.map(m => ({
+        model: m.model, weight: m.weight, enabled: !!m.enabled, window: m.window || ''
+      }))
+    })),
+    options: mgOpts
+  };
+  try {
+    await api('model_groups', { method: 'POST', body: JSON.stringify(payload) });
+    mgDirty = false;
+    toast('已保存');
+    // 保留当前选中组：保存第 3 个组后跳回第 1 个会让人以为保存丢了。
+    await loadModelGroups(true);
+  } catch (e) {
+    toast('保存失败：' + e.message, 'err');
+  }
 };

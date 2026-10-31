@@ -26,6 +26,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/balance"
 	"github.com/misakano7545/workbuddy2api-panel/internal/credithist"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
+	"github.com/misakano7545/workbuddy2api-panel/internal/modelgroup"
 	"github.com/misakano7545/workbuddy2api-panel/internal/panel"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/redisstore"
@@ -73,6 +74,83 @@ func insecureKeyWarning(listen, apiKey string) string {
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
 func usagePathFor(stateFile string) string { return stateSibling(stateFile, "usage.json") }
+
+// compileModelGroups 把配置里的组定义编译成运行时形态并包成 GroupSet。
+//
+// 非法条目在 Compile 内部丢弃（不阻断启动）：一份配置里写错一个成员
+// 不该让整个网关起不来。返回 nil 表示「无组」，与键缺席等价。
+func compileModelGroups(cfg *Config) *modelgroup.GroupSet {
+	groups, opts := modelgroup.Compile(cfg.Pool.ModelGroups, cfg.ModelGroupOpts)
+	if len(groups) == 0 {
+		return nil
+	}
+	for _, g := range groups {
+		log.Printf("[modelgroup] 组 %q 已加载：%d 成员，启用=%v", g.ID, len(g.Members), g.Enabled)
+	}
+	return modelgroup.NewGroupSet(groups, opts)
+}
+
+// modelGroupOptionsFrom 把运行时参数写回配置形态（面板保存时用）。
+// 指针字段一律给显式值：面板保存是「用户确认过的完整状态」，
+// 不留 nil 让下次加载再猜默认。
+func modelGroupOptionsFrom(o modelgroup.Options) ModelGroupOptions {
+	t, f := true, false
+	prefer, sniff := &t, &f
+	if !o.PreferLastOK {
+		prefer = &f
+	}
+	if o.SniffEnabled {
+		sniff = &t
+	}
+	return ModelGroupOptions{
+		PreferLastOK:  prefer,
+		SniffEnabled:  sniff,
+		SniffInterval: o.SniffInterval.String(),
+		SniffMinUntil: o.SniffMinUntil.String(),
+		SniffMinGap:   o.SniffMinGap.String(),
+	}
+}
+
+// saveModelGroups 保存组配置：读盘上原始 JSON → 只覆盖 pool.model_groups 与
+// pool.model_group 两个键 → 原子落盘 → 重建 live 快照。
+//
+// 为什么用「原始 map 合并」而不是整体序列化 Config：Config 里有很多
+// json:"-" 的解析后字段，且用户手写的注释性键/未知键在 Unmarshal 时会丢。
+// 只覆盖我们负责的两个键，其余字节原样保留（与 saveConfig 的合并策略一致）。
+func saveModelGroups(path string, live *livecfg.Holder, groups []modelgroup.GroupConfig, opts modelgroup.Options) error {
+	oldRaw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read current config: %w", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(oldRaw, &root); err != nil {
+		return fmt.Errorf("parse current config: %w", err)
+	}
+	poolMap, _ := root["pool"].(map[string]any)
+	if poolMap == nil {
+		poolMap = map[string]any{}
+		root["pool"] = poolMap
+	}
+	poolMap["model_groups"] = groups
+	poolMap["model_group"] = modelGroupOptionsFrom(opts)
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := safefile.WriteKeep(path, out, 0o600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	// 重新加载以拿到 normalize 后的 Options（阈值缺省值等），再热替换快照。
+	cur, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("reload config: %w", err)
+	}
+	snap := live.Load()
+	snap.ModelGroupSet = compileModelGroups(cur)
+	snap.ModelGroupOpts = cur.ModelGroupOpts
+	live.Store(snap)
+	return nil
+}
 
 // stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径场景回落当前目录）。
 // usage.json（用量记录）与 output_probes.json（模型上限探测）共用本规则。
@@ -361,6 +439,9 @@ func main() {
 		ModelAliases:     livecfg.NormalizeModelAliases(cfg.Models.Aliases),
 		// 模型降级路由表（pool.model_fallback）：6004 限流时同账号改用等价模型。
 		ModelFallback: cfg.Pool.ModelFallback,
+		// 模型组：组集合直接从编译产物取（含 lastOK 运行态）。
+		ModelGroupSet:  compileModelGroups(cfg),
+		ModelGroupOpts: cfg.ModelGroupOpts,
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
@@ -402,6 +483,12 @@ func main() {
 		AutoEnabled: cfg.Update.AutoEnabled,
 		AutoTime:    cfg.Update.AutoTime,
 	})
+	// 模型组可用性缓存：gw（路由）与面板（探活时刻）共用同一实例。
+	// 先声明在这里，因为 pn 的 Config 里要用它。
+	mgCache := &modelgroup.Cache{}
+	// mgSniffer 由下方（live 快照装配后）赋值；面板「立即嗅探」通过它跑一轮，
+	// 与定时嗅探完全同一份逻辑（含频率上限），面板因此不必重写判据。
+	var mgSniffer *modelgroup.Sniffer
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
 		Pool:       p,
@@ -413,6 +500,26 @@ func main() {
 		ModelFallback: func() map[string]string { return live.Load().ModelFallback },
 		// 余额趋势采样记录器：nil 时该视图返回 501。
 		Balance: bal,
+		// 模型组：组集合与缓存都读运行期实例（与 gw 共用同一份，lastOK 才能累积）。
+		// 注意 gw 的注入在下方（live 快照装配之后），这里先用闭包延迟求值。
+		GroupSet:   func() *modelgroup.GroupSet { return live.Load().ModelGroupSet },
+		GroupCache: func() *modelgroup.Cache { return mgCache },
+		// 保存组配置：读当前盘上配置 → 改组 → 落盘 → 重建 live 快照（热生效）。
+		SaveModelGroups: func(groups []modelgroup.GroupConfig, opts modelgroup.Options) error {
+			configSaveMu.Lock()
+			defer configSaveMu.Unlock()
+			return saveModelGroups(*cfgPath, live, groups, opts)
+		},
+		// 「立即嗅探全部」：跑一轮与定时嗅探相同的逻辑。
+		// 用 RunOnceNow 而非 RunOnce：手动点击是明确的一次性意图，
+		// 不该被 sniff_enabled 总开关拦住（频率上限仍然生效，防打爆上游）。
+		SniffModelGroups: func(ctx context.Context) (int, int, error) {
+			if mgSniffer == nil {
+				return 0, 0, errors.New("sniffer not started")
+			}
+			probed, recovered := mgSniffer.RunOnceNow(ctx, time.Now())
+			return probed, recovered, nil
+		},
 		// 后台任务的自动触发开关与成长任务排程共用热配置（schedule.growth_enabled）。
 		AutoTasksEnabled: sch.GrowthEnabled,
 		AuthDir:          cfg.AuthDir,
@@ -512,6 +619,22 @@ func main() {
 	defer stop()
 	updateManager.SetRestart(stop)
 	go updateManager.Run(ctx)
+
+	// 模型组：组集合直接从 live 快照取（快照里放的就是 *GroupSet，
+	// lastOK 运行态随快照一起替换，热更后从权重序重新学习）。
+	mgGroups := func() *modelgroup.GroupSet { return live.Load().ModelGroupSet }
+	gw.SetGroups(mgGroups)
+	gw.SetCache(mgCache)
+	// 嗅探器无条件创建：定时循环是否启动由 sniff_enabled 决定，但面板的
+	// 「立即嗅探全部」需要一个可用实例 —— 手动触发不受总开关约束（见 RunOnceNow）。
+	// Options 走 live 快照，热改配置后下一轮即生效。
+	{
+		snap := live.Load()
+		mgSniffer = modelgroup.NewSniffer(mgCache, mgGroups, server.NewMemberProber(p, up), snap.ModelGroupOpts)
+		if snap.ModelGroupSet != nil && snap.ModelGroupOpts.SniffEnabled {
+			mgSniffer.Start(ctx)
+		}
+	}
 	// 账号后台任务（taskjobs）：状态与主 state 同目录，重启后自动恢复未完成作业。
 	if err := pn.StartTaskJobs(ctx, stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
 		p.Flush() // Fatal 绕过 defer：至少把池状态落盘再退
@@ -795,6 +918,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		AllowedModels:    newAllowedModels,
 		AllowlistEnabled: newAllowlistEnabled,
 		ModelAliases:     livecfg.NormalizeModelAliases(newCfg.Models.Aliases),
+		// ModelFallback 必须一起热应用：快照是整体替换，漏掉这个键会让
+		// 保存配置把降级表静默清空（既有缺陷，随本次接线一并修正）。
+		ModelFallback: newCfg.Pool.ModelFallback,
+		// 模型组：必须用**编译后**的组（realm/bare 已解析、成员已排序）。
+		// lastOK 运行态随新对象从零开始——组定义变了，上次可用成员未必还有意义。
+		ModelGroupSet:  compileModelGroups(newCfg),
+		ModelGroupOpts: newCfg.ModelGroupOpts,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	up.SanitizeBrandScope.Store(newCfg.Features.SanitizeBrandScope)

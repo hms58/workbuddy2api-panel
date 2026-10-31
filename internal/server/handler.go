@@ -21,6 +21,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
+	"github.com/misakano7545/workbuddy2api-panel/internal/modelgroup"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/prompt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
@@ -48,6 +49,12 @@ type Config struct {
 	// 前缀均可），value = 6004 限流时改用的等价模型。空/nil = 不降级（老行为）。
 	// 只对 6004 模型级限流生效；降级不写持久状态，冷却到期自动回原模型。
 	ModelFallback func() map[string]string
+
+	// Groups 模型组集合（读 live 快照，支持热更）。nil = 未启用组功能。
+	Groups func() *modelgroup.GroupSet
+
+	// Cache 模型组可用性缓存（nil = 不缓存，每次请求逐成员真实尝试）。
+	Cache *modelgroup.Cache
 
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
@@ -622,6 +629,27 @@ func (h *Handler) modelList() []map[string]any {
 	// 出图模型（目录里被 tag 剔掉的 text-to-image / image-to-image）：对话列表照旧不含它们，
 	// 这里以 image_generation=true 单列——客户端据此发现可用的出图模型名，不会误发对话。
 	out = append(out, h.generationModelEntries()...)
+	// 模型组：以虚拟模型名 group:<id> 暴露，客户端在模型选择器里可见。
+	// 停用的组不列出（点名也返回 400）；hidden 对组名同样生效 ——
+	// 否则「隐藏了某模型」但它仍在组里被用到，隐藏机制出现绕过口。
+	if gs := h.groupSet(); gs != nil {
+		for _, g := range gs.All() {
+			if !g.Enabled {
+				continue
+			}
+			// hidden 的键形态是 "cn:x"/"global:x"（NormalizeHiddenModels 归一化后）。
+			// 组名统一按 cn 域登记，与「裸名两域都藏」的既有口径对齐。
+			if h.hiddenModel("cn", groupPrefix+g.ID) {
+				continue
+			}
+			out = append(out, map[string]any{
+				"id":       groupPrefix + g.ID,
+				"object":   "model",
+				"created":  1753600000,
+				"owned_by": "model-group",
+			})
+		}
+	}
 	return out
 }
 
@@ -821,7 +849,62 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   - **实际用途**（选号 / 出站 body 重写 / 成本记账 / 提示语）→ curModel
 	//   - **冷却记账**（applyErrorPolicy 的 6004 分支）→ bareModel（**限流的是原模型**！
 	//     若误记成等价模型，会把本来好好的等价模型也冷却掉，降级就白做了）
+	// 模型组（group:<id>）：与 cn:/global: 并列的第三种点名方式。
+	//
+	// 位置：在 aliases 之后、curModel 之前。组名不参与 aliases 映射（组本身就是
+	// 「一组模型的别名」），但必须早于 curModel —— 成员模型才是本轮真正要打的模型。
+	var chain *chainState
+	if groupID, isGroup := splitGroupPrefix(peek.Model); isGroup {
+		plan, ok := h.groupPlan(groupID, time.Now())
+		if !ok {
+			// 无此组 / 组停用 / 当前无可见成员：都是配置侧问题，
+			// 不能回落成裸模型名去打上游（那会把 "group:x" 当成模型名，必 11102）。
+			writeOpenAIErrorHint(w, http.StatusBadRequest, "model_unavailable",
+				"model group \""+groupID+"\" has no usable member now (all disabled or out of their active window)", "")
+			return
+		}
+		chain = newChainState(groupID, plan)
+		if m, ok := chain.current(); ok {
+			realm, bareModel = m.Realm, m.Bare
+			chain.markCurrentTried()
+		}
+		// 回显名固定为客户端原发的 group:<id>。
+		modelEcho = peek.Model
+		// 出站 body 改成成员裸名：上游只认裸名，而 peek.Model 是 "group:<id>"
+		//（上游必 11102）。与 aliases/fallback 同一手法，保持单一路径。
+		var obj map[string]any
+		if json.Unmarshal(body, &obj) == nil {
+			obj["model"] = bareModel
+			if nb, merr := json.Marshal(obj); merr == nil {
+				body = nb
+			}
+		}
+	}
 	curModel := bareModel
+	// 组请求：以当前成员覆盖 realm/模型，并把回显名固定为客户端原发的 group:<id>。
+	// 必须在 curModel 赋值之后做 —— 成员模型才是本轮真正要打的模型。
+	if chain != nil {
+		if m, ok := chain.current(); ok {
+			realm, bareModel = m.Realm, m.Bare
+			curModel = bareModel
+			chain.markCurrentTried()
+		}
+		modelEcho = peek.Model
+		// 组请求的出站 body 也要改成成员裸名：上游只认裸名，
+		// 而 peek.Model 是 "group:<id>"（上游必 11102）。与 aliases/fallback
+		// 同一手法（改顶层 model 后重序列化），保持单一路径。
+		var obj map[string]any
+		if json.Unmarshal(body, &obj) == nil {
+			obj["model"] = curModel
+			if nb, merr := json.Marshal(obj); merr == nil {
+				body = nb
+			}
+		}
+	}
+	// statRef 指向本请求的统计对象，供下方闭包（applyFallback）同步日志展示。
+	// 为什么用指针而不是直接捕获 st：st 在 applyFallback 之后才声明，
+	// Go 不允许前向引用；指针在这里先声明、等 st 建好再赋值。
+	var statRef *chatStat
 	// fallbackTried 记录本请求**已试过的降级目标**，防 A→B→A 循环。
 	// 与 tried（按账号去重）正交：降级是「同账号换模型」，故需独立追踪。
 	fallbackTried := map[string]bool{}
@@ -849,6 +932,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		fallbackTried[to] = true
 		log.Printf("model fallback: %s -> %s (6004 model rate limit, uid pending)", curModel, to)
 		curModel = to
+		// 降级换模型也要反映到运行日志。st 在本闭包之后才声明，
+		// 用指针间接引用（见 statRef 的声明与赋值）。
+		if statRef != nil {
+			statRef.usedModel = realm + ":" + to
+		}
 		// 出站 body 重写：上游必须收到等价模型名。与上方 models.aliases 同一手法
 		// （解析 → 改顶层 model → 重序列化），保持单一路径、避免两套改写逻辑漂移。
 		// 解析失败时不动 body —— 那说明请求体本就不是合法 JSON，后续会按原样失败。
@@ -870,6 +958,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// routeModel：映射请求显示真实路由名（别名 INFO 行已记录 客户端名 -> 真实名，
 	// 两行合看即全链路；流水行与账本/上游口径一致，运维排查不用做心算翻译）。
 	st := newChatStat(time.Now(), routeModel, peek.Stream, h.budget)
+	statRef = st // 供上方 applyFallback 闭包同步日志展示
+	// 组请求：记下组 id 与当前成员名，供运行日志显示 "group:<id>/cn:xxx"。
+	// 后续每次 chain.advance 都要同步 usedModel（否则日志会停留在第一个成员上，
+	// 出现「日志说用了 A、实际打的是 B」这种最误导运维的情形）。
+	if chain != nil {
+		st.groupID = chain.groupID
+		// 用 bareModel 而不是 routeModel：组场景下 routeModel 仍是客户端点名的
+		// "group:<id>"（它在 aliases 阶段定型、不随成员切换），拿它拼会得到
+		// "cn:group:logtest" 这种错串。bareModel 才是此刻真正要打的成员名。
+		// 带域前缀是因为 cn:m1 与 global:m1 是两个不同的模型，裸名无法区分。
+		st.usedModel = realm + ":" + bareModel
+	}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
@@ -921,13 +1021,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if cacheKeyID == "" {
 		cacheKeyID = session.DeriveCacheKey(body)
 	}
+	// 粘性预检用的模型名：直连沿用 routeModel，**组请求改用当前成员的真实模型**。
+	//
+	// 为什么不能沿用 routeModel（组请求里它是 "group:<id>"）：
+	// 预检最终落到 pool 的 (realm, bareModel) 可用性过滤，而 SplitRealmPrefix 对
+	// "group:<id>" 会回落成 realm=cn / bare="group:<id>" —— 于是预检集合只剩 cn 账号，
+	// 且没有任何账号会因 "group:<id>" 被模型级锁。两个后果：
+	//   - global 成员：绑定的 global 号永远不在预检集合里 → 每请求都走慢路径把绑定
+	//     改写成某个 cn 号，随即被下面的 realm 校验解绑 → 组内 global 成员的会话
+	//     粘性实际失效（直连 global:xxx 却是正常的）；
+	//   - cn 成员：预检退化成纯账号级健康，比直连宽松（真正的模型校验由
+	//     PickByUIDForModel(stickyUID, curModel) 兜住，只多一次解绑/回落）。
+	// 成员推进时绑定不动，PickByUIDForModel 每一轮都会按新成员的模型再校验，
+	// 所以这里用「首个成员」的模型名做预检即可。
+	stickyModel := routeModel
+	if chain != nil {
+		if realm != "" {
+			stickyModel = realm + ":" + bareModel
+		} else {
+			stickyModel = bareModel
+		}
+	}
 	stickyUID := ""
 	if h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
 		// 用 routeModel 而非 peek.Model（issue #30）：映射后必须按真实模型的
 		// 可用性口径判绑定，别名名不在任何账本里。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, routeModel); ok {
+		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, stickyModel); ok {
 			stickyUID = uid
 		}
 	}
@@ -1103,7 +1224,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
-	for i := 0; i < h.cfg.MaxRotate; i++ {
+	// 组请求需要走完「每成员 × 每账号」：上界 = MaxRotate × 可见链长，钳 32
+	//（防极端配置把一次请求拖成几十跳）。非组请求保持 MaxRotate 不变。
+	rotateCap := h.cfg.MaxRotate
+	if chain != nil {
+		rotateCap = h.cfg.MaxRotate * len(chain.plan)
+		if rotateCap > 32 {
+			rotateCap = 32
+		}
+	}
+	for i := 0; i < rotateCap; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
@@ -1121,6 +1251,45 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickExcludingForRealm(tried, curModel, realm)
 		}
 		if acct == nil {
+			// 组请求：当前成员在该域已无号可服务 → 推进到下一个成员。
+			//
+			// 判据是 pool 的返回值（Pick 返回 nil），不是「上游报了什么错」——
+			// 额度按账户独立，只有该域全部账号都不可用才推进。单账号失败由
+			// applyErrorPolicy 罚该账号后在同一成员内换号消化。
+			if chain != nil {
+				info := h.cfg.Pool.ServableFor(realm, bareModel)
+				if info.Count == 0 {
+					h.markMemberLocked(chain.groupID, realm, bareModel, info, time.Now())
+					chain.markCurrentTried()
+					if chain.advance(time.Now()) {
+						if m, ok := chain.current(); ok {
+							realm, bareModel = m.Realm, m.Bare
+						}
+						curModel = bareModel
+						// 日志展示必须跟着换：否则运行日志会停在第一个成员上，
+						// 而实际请求已经打到了新成员 —— 排查时会看错模型。
+						// 带域前缀：cn:m2 与 global:m2 是不同模型，裸名无法区分。
+						st.usedModel = realm + ":" + bareModel
+						// tried 的语义是「当前模型内已试过的账号」：换模型后权威排除
+						// 依据变成 pool 自身的冷却状态（模型级记 modelCooldowns、账号级
+						// 记 until，Pick 都天然过滤）。不清空会把「在 m1 上失败、但对 m2
+						// 健康」的号错误排掉 —— 而那正是组内推进的主要收益来源。
+						tried = map[string]bool{}
+						busyWaited = false
+						// 出站 body 跟着换成员名。
+						var obj map[string]any
+						if json.Unmarshal(body, &obj) == nil {
+							obj["model"] = curModel
+							if nb, merr := json.Marshal(obj); merr == nil {
+								body = nb
+							}
+						}
+						log.Printf("model group %s: advance to %s:%s (no account for previous member)",
+							chain.groupID, realm, bareModel)
+						continue
+					}
+				}
+			}
 			// ⭐ 模型降级兜底（20261021 补的真实缺口）：全池该模型都处于 6004 冷却时，
 			// PickExcludingForRealm 直接返回 nil —— 若只在上游返回 6004 后降级，这里会
 			// **先报 503、根本走不到降级**，恰好在最需要降级的场景（全池被限流）失效。
@@ -1269,10 +1438,67 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			//
 			// ⚠️ 冷却必须记在 **bareModel**（原模型）名下——见函数内 applyErrorPolicy
 			// 调用处。若误记成等价模型，会把本来好好的等价模型也冷却掉，降级白做。
+			//
+			// penalized：本分支已对该账号施加过错误策略时置位，下方通用尾部据此不再
+			// 重复罚号 —— 重复调用会把冷却时长与连败计数按调用次数翻倍。
+			penalized := false
 			if kind == upstream.ErrSoftRate && upstream.IsModelRateLimit(string(respBody)) {
+				// 组请求：先按**原模型**罚账号/记冷却（限流的是原模型），再判断该成员
+				// 是否已全域无号 —— 是则推进到下一个成员，否则留在本成员换号。
+				//
+				// ⚠️ 这里必须先罚再判，且只罚一次：罚完才有准确的 ServableFor 结果。
+				//
+				// ⚠️ 推进成员只在 info.Count == 0（该域**全部**账号都被这个模型锁住）
+				// 时发生。历史缺陷：markCurrentTried/advance 曾写在这个 if 之外，于是
+				// 「成员内只要有一个号被 6004 限流，整组就跳到下一个模型」（用户实测
+				// 反馈的正是这条；与 prefer_last_ok 开关无关，开着关着都一样）。
+				if chain != nil {
+					h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+					penalized = true
+					info := h.cfg.Pool.ServableFor(realm, bareModel)
+					if info.Count == 0 {
+						h.markMemberLocked(chain.groupID, realm, bareModel, info, time.Now())
+						chain.markCurrentTried()
+						if chain.advance(time.Now()) {
+							if m, ok := chain.current(); ok {
+								realm, bareModel = m.Realm, m.Bare
+							}
+							curModel = bareModel
+							// 同上一处：日志展示必须跟实际请求一起换，且带域前缀。
+							st.usedModel = realm + ":" + bareModel
+							tried = map[string]bool{}
+							busyWaited = false
+							releaseHeld()
+							var obj map[string]any
+							if json.Unmarshal(body, &obj) == nil {
+								obj["model"] = curModel
+								if nb, merr := json.Marshal(obj); merr == nil {
+									body = nb
+								}
+							}
+							log.Printf("model group %s: advance to %s:%s (6004 on previous member, no servable account left)",
+								chain.groupID, realm, bareModel)
+							continue
+						}
+					} else {
+						// 还有别的号能服务这个模型：只记「何时值得重试」，不改可用性。
+						if h.cfg.Cache != nil {
+							h.cfg.Cache.TouchUntil(realm, bareModel, info.EarliestUnlock, info.Reason)
+						}
+						// 罚号后留在本成员换号：tried 已含本号、它也已进模型冷却，
+						// 下一轮选号自然落到同成员的另一号。不推进成员。
+						fail(acct.UID)
+						if !rotateBackoff(i, r.Context()) {
+							break
+						}
+						continue
+					}
+				}
 				if to := fallbackTo(); to != "" {
 					// 先按原模型罚账号/记冷却（限流的是原模型），再切等价模型重试。
-					h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+					if !penalized {
+						h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+					}
 					savedBare := bareModel
 					if applyFallback(to) {
 						// 同账号重试：把该账号从 tried 移除（降级是「换模型」不是「换号」，
@@ -1418,7 +1644,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
-			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+			// penalized 为真说明上方 6004 分支已经罚过这个号（组内既无可用号推进、
+			// 也没配等价模型的情形）—— 再罚一次会让冷却时长/连败计数翻倍。
+			if !penalized {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+			}
 			fail(acct.UID)
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
 			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
@@ -1443,6 +1673,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if sessKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(sessKey, acct.UID)
 		}
+		// 该成员成功服务了一次：标记可用 + 更新组的 lastOK（下次优先用它）。
+		// 放在分流之前：两条成功路径都要记。
+		h.noteMemberOK(chainGroupID(chain), realm, bareModel)
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
