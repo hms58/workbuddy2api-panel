@@ -7,6 +7,8 @@ package panel
 
 import (
 	"fmt"
+	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -72,4 +74,72 @@ func (p *Panel) claimTask(a *auth.Auth, code string) (credit, energy int64, err 
 		return p.cfg.Upstream.ClaimRewardMP(a, code)
 	}
 	return p.cfg.Upstream.ClaimReward(a, code)
+}
+
+// growthClaimRoutes 注册成长任务人工领取相关路由（panel.routes 末尾调用一次）。
+func (p *Panel) growthClaimRoutes() {
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim_all", p.withAuth(p.accountTaskClaimAll))
+}
+
+// accountTaskClaimAll 一次性领取该账号全部「已达标未领」的奖励。
+// 人工领取不过模式闸门：用户点按钮就是明确要求领奖。
+func (p *Panel) accountTaskClaimAll(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	a := p.accountByUID(w, uid)
+	if a == nil {
+		return
+	}
+	if !a.SupportsPersonalEndpoints() {
+		writeErr(w, http.StatusUnprocessableEntity, noPersonalTaskMessage)
+		return
+	}
+	if a.IsGlobal() {
+		writeErr(w, http.StatusNotImplemented, globalTaskWriteMessage)
+		return
+	}
+	if !p.tryLockAccount(uid) {
+		writeErr(w, http.StatusConflict, "该账号有任务动作正在执行中，请等本轮结束后再试")
+		return
+	}
+	defer p.unlockAccount(uid)
+
+	tasks, err := p.cfg.Upstream.ListTasks(a)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
+		return
+	}
+	all := make([]upstream.Task, 0, len(tasks)*2)
+	all = append(all, tasks...)
+	if mp, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+		all = append(all, mp...)
+	} else {
+		log.Printf("panel: 全部领取 uid=%s mp 列表: %v", uid, mpErr)
+	}
+
+	seen := make(map[string]bool, len(all))
+	var claimed int
+	var credit, energy int64
+	failed := make([]map[string]any, 0)
+	for _, t := range all {
+		if t.TaskCode == "" || seen[t.TaskCode] {
+			continue // mp 列表是默认口径的超集，同码只能领一次
+		}
+		seen[t.TaskCode] = true
+		if !t.Claimable || t.Claimed || t.Locked {
+			continue
+		}
+		c, e, cerr := p.claimTask(a, t.TaskCode)
+		if cerr != nil {
+			log.Printf("panel: 全部领取 uid=%s %s: %v", uid, t.TaskCode, cerr)
+			failed = append(failed, map[string]any{"task_code": t.TaskCode, "error": cerr.Error()})
+			continue
+		}
+		claimed++
+		credit += c
+		energy += e
+	}
+	log.Printf("panel: 全部领取 uid=%s 领奖 %d 项 +%d分 +%d能（失败 %d）", uid, claimed, credit, energy, len(failed))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "claimed": claimed, "credit": credit, "energy": energy, "failed": failed,
+	})
 }

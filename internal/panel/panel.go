@@ -308,6 +308,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
 	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.checkUpdate))
 	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.installUpdate))
+	// 成长任务人工领取（growthclaim.go）：完成与领奖拆两步后，领奖走面板按钮。
+	p.growthClaimRoutes()
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

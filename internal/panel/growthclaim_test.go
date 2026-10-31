@@ -1,11 +1,17 @@
 package panel
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
+	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
@@ -153,5 +159,115 @@ func TestMPRunnerNoLongerClaimsInline(t *testing.T) {
 	_, claims, _ := state.counters()
 	if claims != 0 {
 		t.Fatalf("runner 自己发起了 %d 次领奖（应交给 executeAutoTask）", claims)
+	}
+}
+
+// claimAllFake 全部领取的假上游：默认口径与 mp 口径各下发一份任务，记录领奖分流。
+type claimAllFake struct {
+	mu     sync.Mutex
+	tasks  []map[string]any
+	claims []string // "<code>|<x-client-platform>"
+}
+
+func (f *claimAllFake) handler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v2/activity/growth/tasks":
+			f.mu.Lock()
+			body, _ := json.Marshal(map[string]any{"code": 0, "msg": "OK", "data": map[string]any{"tasks": f.tasks}})
+			f.mu.Unlock()
+			_, _ = w.Write(body)
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/activity/growth/tasks/") &&
+			strings.HasSuffix(r.URL.Path, "/claim"):
+			code := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/activity/growth/tasks/"), "/claim")
+			f.mu.Lock()
+			f.claims = append(f.claims, code+"|"+r.Header.Get("x-client-platform"))
+			f.mu.Unlock()
+			_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{"already_claimed":false,"credit":100,"energy":5}}`))
+		default:
+			t.Errorf("未预期的上游请求: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+}
+
+func claimAllPanel(t *testing.T, f *claimAllFake, a *auth.Auth) *Panel {
+	t.Helper()
+	srv := httptest.NewServer(f.handler(t))
+	t.Cleanup(srv.Close)
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
+	p := pool.New("")
+	p.Add(a)
+	return New(Config{Pool: p, Upstream: up})
+}
+
+// TestClaimAllOnlyClaimable 全部领取只领「达标 + 未领 + 未锁定」，mp 码走 mp 头；
+// 手动领取不过闸门（人工操作永远允许）。
+func TestClaimAllOnlyClaimable(t *testing.T) {
+	f := &claimAllFake{tasks: []map[string]any{
+		{"task_code": "chat_5", "target": 5, "current": 5, "accept_status": "completed"},
+		{"task_code": "Library_read", "target": 1, "current": 1},
+		{"task_code": "template_5", "target": 5, "current": 2},
+		{"task_code": "Hp_Appearance", "target": 1, "current": 1, "locked": true},
+		{"task_code": "skill_1", "target": 1, "current": 1, "accept_status": "claimed"},
+		{"task_code": "Sequential_Tasks_1", "target": 1, "current": 1},
+	}}
+	p := claimAllPanel(t, f, &auth.Auth{UID: "cn-1", Nickname: "cn", AccessToken: "at"})
+	p.SetGrowthClaimMode(claimModeManual)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/accounts/cn-1/tasks/claim_all", nil)
+	req.SetPathValue("uid", "cn-1")
+	p.accountTaskClaimAll(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		OK      bool  `json:"ok"`
+		Claimed int   `json:"claimed"`
+		Credit  int64 `json:"credit"`
+		Energy  int64 `json:"energy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK || resp.Claimed != 3 {
+		t.Fatalf("resp=%+v want ok 且 claimed=3（chat_5 / Library_read / Sequential_Tasks_1）", resp)
+	}
+	if resp.Credit != 300 || resp.Energy != 15 {
+		t.Fatalf("credit/energy=%d/%d want 300/15", resp.Credit, resp.Energy)
+	}
+	f.mu.Lock()
+	got := strings.Join(f.claims, ",")
+	f.mu.Unlock()
+	if got != "chat_5|web,Library_read|web,Sequential_Tasks_1|miniprogram" {
+		t.Fatalf("claim 分流=%q", got)
+	}
+}
+
+// TestClaimAllRespectsAccountLock 该账号有任务动作在跑时直接 409，不并发领奖。
+func TestClaimAllRespectsAccountLock(t *testing.T) {
+	f := &claimAllFake{tasks: []map[string]any{
+		{"task_code": "chat_5", "target": 5, "current": 5},
+	}}
+	p := claimAllPanel(t, f, &auth.Auth{UID: "cn-1", Nickname: "cn", AccessToken: "at"})
+	if !p.tryLockAccount("cn-1") {
+		t.Fatal("测试前置：应能拿到账号锁")
+	}
+	defer p.unlockAccount("cn-1")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/accounts/cn-1/tasks/claim_all", nil)
+	req.SetPathValue("uid", "cn-1")
+	p.accountTaskClaimAll(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d want 409；body=%s", rec.Code, rec.Body.String())
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.claims) != 0 {
+		t.Fatalf("持锁期间不得领奖，claims=%v", f.claims)
 	}
 }
