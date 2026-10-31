@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -74,5 +75,83 @@ func TestGrowthClaimModeDefaultIsManual(t *testing.T) {
 	p.SetGrowthClaimMode("auto")
 	if got := p.growthClaimModeValue(); got != claimModeAuto {
 		t.Fatalf("auto 未被接受，got %q", got)
+	}
+}
+
+// TestClaimAutoTaskKeepsRewardWhenManual 手动模式下「已达标未领」既不是完成也不是领奖失败：
+// 状态必须能与 claim_pending（领奖失败待重试）区分开，且不发领奖请求。
+func TestClaimAutoTaskKeepsRewardWhenManual(t *testing.T) {
+	p, a, state := newAutoTaskTestPanel(t, 5, 5, "completed")
+	p.SetGrowthClaimMode(claimModeManual)
+	act := &autoAction{TaskCode: "chat_5"}
+	before := &upstream.Task{TaskCode: "chat_5", Target: 5, Current: 5, Claimable: true}
+
+	out := p.claimAutoTask(a, act, "任务已达标", before, before)
+	if out.Status != "claim_manual" {
+		t.Fatalf("status=%q want claim_manual（%s）", out.Status, out.Message)
+	}
+	if out.Claimed {
+		t.Fatal("手动模式不得标记为已领取")
+	}
+	if out.ClaimError != "" {
+		t.Fatalf("claim_error 非空会被前端当成失败: %q", out.ClaimError)
+	}
+	_, claims, _ := state.counters()
+	if claims != 0 {
+		t.Fatalf("手动模式发起了 %d 次领奖请求", claims)
+	}
+}
+
+// TestClaimAutoTaskFirstBuddyIgnoresManualMode first_buddy 的奖励在 buddy/first 动作链里
+// 到账，没有独立 claim 步骤：被闸门拦住会报「待领取」却永远领不到。
+func TestClaimAutoTaskFirstBuddyIgnoresManualMode(t *testing.T) {
+	p, a, state := newAutoTaskTestPanel(t, 1, 1, "completed")
+	p.SetGrowthClaimMode(claimModeManual)
+	state.taskCode = "first_buddy"
+	act := &autoAction{TaskCode: "first_buddy"}
+	before := &upstream.Task{TaskCode: "first_buddy", Target: 1, Current: 1, Claimable: true}
+
+	out := p.claimAutoTask(a, act, "已领取 Buddy", before, before)
+	if out.Status != "done" {
+		t.Fatalf("status=%q want done（first_buddy 不参与手动领取）", out.Status)
+	}
+	_, claims, _ := state.counters()
+	if claims != 1 {
+		t.Fatalf("claims=%d want 1", claims)
+	}
+}
+
+// TestClaimAutoTaskAutoModeStillClaims 回归：auto 模式下行为与改造前一致（达标即领）。
+func TestClaimAutoTaskAutoModeStillClaims(t *testing.T) {
+	p, a, state := newAutoTaskTestPanel(t, 5, 5, "completed")
+	p.SetGrowthClaimMode(claimModeAuto)
+	act := &autoAction{TaskCode: "chat_5"}
+	before := &upstream.Task{TaskCode: "chat_5", Target: 5, Current: 5, Claimable: true}
+
+	out := p.claimAutoTask(a, act, "任务已达标", before, before)
+	if out.Status != "done" || !out.Claimed || out.Credit != 100 {
+		t.Fatalf("outcome=%#v want done/claimed/+100", out)
+	}
+	if _, claims, _ := state.counters(); claims != 1 {
+		t.Fatalf("claims=%d want 1", claims)
+	}
+}
+
+// TestMPRunnerNoLongerClaimsInline mp 任务 runner 只负责完成动作：领奖由
+// executeAutoTask 统一走闸门，runner 自己再领一次会在手动模式下绕过闸门。
+func TestMPRunnerNoLongerClaimsInline(t *testing.T) {
+	p, a, state := newAutoTaskTestPanel(t, 5, 5, "completed")
+	p.SetGrowthClaimMode(claimModeManual)
+
+	msg, err := p.runMPMiniChatTask(a, "chat_5")
+	if err != nil {
+		t.Fatalf("runner 报错: %v", err)
+	}
+	if !strings.Contains(msg, "达标") {
+		t.Fatalf("runner 消息=%q，应说明进度已达标", msg)
+	}
+	_, claims, _ := state.counters()
+	if claims != 0 {
+		t.Fatalf("runner 自己发起了 %d 次领奖（应交给 executeAutoTask）", claims)
 	}
 }

@@ -428,14 +428,11 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string) (string, error) {
 			t = t2
 		}
 	}
-	// 已达标（含 completed 未领）：直接领奖。
+	// 已达标（含 completed 未领）：不做动作，交给 executeAutoTask 统一领奖
+	// （领奖要过模式闸门，runner 自己领会绕过它）。
 	target := mpChatTarget(code, t.Target)
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
+		return "进度已达标，无需再上报", nil
 	}
 	// 判据上报：按差额补 mini chat 事件。每条前 sleep mpChatEventGap+抖动——
 	// 连发会被上游反作弊判无效（见 mpChatEventGap 注释），宁可慢不可白报。
@@ -465,11 +462,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string) (string, error) {
 	if t.Current < target {
 		return fmt.Sprintf("已上报 %d 次但进度未达 %d/%d（异步计分未归账，下次重试）", need, t.Current, target), nil
 	}
-	credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de）", credit, energy), nil
+	return fmt.Sprintf("已上报 %d 次，进度 %d/%d 达标", need, t.Current, target), nil
 }
 
 // runSequentialChat 完成 Sequential_Tasks_1「小程序内完成 1 次有效对话」。
@@ -516,11 +509,7 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 		target = 1
 	}
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
+		return "进度已达标，无需再上报", nil
 	}
 	if t.AcceptStatus == "not_accepted" || t.AcceptStatus == "" {
 		if !p.acceptWithVerifyMP(a, code) {
@@ -553,11 +542,7 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 	if t.Current < target {
 		return "已上报但进度未点亮（判据形态待解锁后校正，下次重试）", nil
 	}
-	credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de）", credit, energy), nil
+	return fmt.Sprintf("已上报，进度 %d/%d 达标", t.Current, target), nil
 }
 
 // runSequentialAutomation 完成 Sequential_Tasks_4「创建定时任务」（预留）。
@@ -623,13 +608,9 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	if target <= 0 {
 		target = 1 // 未 accept 的 mp 任务 progress 为 null，target 兜底（上游实测）
 	}
-	// 已达标（含 completed 未领）：直接领奖。
+	// 已达标（含 completed 未领）：不做动作，交给 executeAutoTask 统一领奖。
 	if t.Current >= target || t.AcceptStatus == "completed" {
-		credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
+		return "进度已达标，无需再上报", nil
 	}
 	// 判据载体前置（accept 之前）：市场真实专家 id。
 	experts, merr := p.cfg.Upstream.MarketExpertList(a, "")
@@ -671,11 +652,7 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	if t.Current < target {
 		return "已上报但进度未归账（异步计分，下次重试）", nil
 	}
-	credit, energy, err := p.cfg.Upstream.ClaimRewardMP(a, code)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("任务点亮并领取奖励（+%dc +%de）", credit, energy), nil
+	return fmt.Sprintf("已上报，进度 %d/%d 达标", t.Current, target), nil
 }
 
 // accountTaskAuto 一键完成单个任务：执行对应动作 → 回读进度 → 汇报结果。
@@ -875,13 +852,16 @@ func (p *Panel) claimAutoTask(a *auth.Auth, act *autoAction, message string, bef
 		Claimable:      true,
 		Attempt:        act.Attempt,
 	}
-	var credit, energy int64
-	var err error
-	if isMPTaskCode(act.TaskCode) {
-		credit, energy, err = p.cfg.Upstream.ClaimRewardMP(a, act.TaskCode)
-	} else {
-		credit, energy, err = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
+	// first_buddy 的奖励在 agreement + buddy/first 动作链里到账，没有独立 claim 步骤；
+	// 过闸门只会得到「待领取」却永远领不到，故豁免。
+	if act.TaskCode != "first_buddy" {
+		if allowed, reason := p.autoClaimAllowed(after); !allowed {
+			out.Status = "claim_manual"
+			out.Message = message + "；" + reason + "（可在面板「领取」或「全部领取」）"
+			return out
+		}
 	}
+	credit, energy, err := p.claimTask(a, act.TaskCode)
 	if err != nil {
 		out.Status = "claim_pending"
 		out.ClaimError = err.Error()

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
@@ -62,4 +63,13 @@ func (p *Panel) autoClaimAllowedAt(t *upstream.Task, now time.Time) (bool, strin
 		return true, fmt.Sprintf("活动剩余 %.1f 小时，自动领取避免过期", remain.Hours())
 	}
 	return false, fmt.Sprintf("活动剩余 %.1f 天，保留人工领取", remain.Hours()/24)
+}
+
+// claimTask 领取单个任务奖励的唯一出口：小程序口径走 chat 域 mp 头，其余走 Web 域。
+// 人工领取与自动领取共用它，避免 mp/web 判断散落在多个调用点。
+func (p *Panel) claimTask(a *auth.Auth, code string) (credit, energy int64, err error) {
+	if isMPTaskCode(code) {
+		return p.cfg.Upstream.ClaimRewardMP(a, code)
+	}
+	return p.cfg.Upstream.ClaimReward(a, code)
 }
