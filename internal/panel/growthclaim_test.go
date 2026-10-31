@@ -164,6 +164,48 @@ func TestMPRunnerNoLongerClaimsInline(t *testing.T) {
 	}
 }
 
+// TestExecuteAutoTaskClaimsMPTaskWithoutUpstreamTarget mp 任务 accept 前 target 下发 0，
+// runner 用 mpChatTarget 兜底（Tasks_1 兜底 1）。若 executeAutoTask 只认上游 target>0，
+// 这类任务会永久停在「等待计分」——runner 不再自己领奖，就再也没人领了。
+func TestExecuteAutoTaskClaimsMPTaskWithoutUpstreamTarget(t *testing.T) {
+	var mu sync.Mutex
+	var claims int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v2/activity/growth/tasks":
+			// target=0（上游没下发进度），current=1（事件已上报）：只有 runner 的兜底
+			// target 能判定达标。
+			_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{"tasks":[
+				{"task_code":"Sequential_Tasks_1","target":0,"current":1,"accept_status":"accepted"}]}}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/claim"):
+			mu.Lock()
+			claims++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{"credit":100,"energy":5}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	up := &upstream.Client{HTTP: server.Client(), ChatBaseCN: server.URL, BillingBaseCN: server.URL, WebBaseCN: server.URL}
+	p := New(Config{Upstream: up})
+	p.SetGrowthClaimMode(claimModeAuto)
+	a := &auth.Auth{UID: "mp-fallback", AccessToken: "token"}
+
+	act := &autoAction{TaskCode: "Sequential_Tasks_1", run: func(*Panel, *auth.Auth) (string, error) {
+		return "已上报，进度 1/1 达标", nil
+	}}
+	out := p.executeAutoTask(a, act)
+	if out.Status != "done" || !out.Claimed {
+		t.Fatalf("outcome=%#v，mp 兜底 target 达标时应领奖，不能停在等待计分", out)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if claims != 1 {
+		t.Fatalf("claims=%d want 1", claims)
+	}
+}
+
 // claimAllFake 全部领取的假上游：默认口径与 mp 口径各下发一份任务，记录领奖分流。
 type claimAllFake struct {
 	mu     sync.Mutex

@@ -745,6 +745,23 @@ func taskProgressReached(t *upstream.Task) bool {
 		t.AcceptStatus == "completed" || strings.EqualFold(t.Status, "complete"))
 }
 
+// taskReachedForAuto 自动执行器的达标判定：mp 任务在 accept 前上游不下发 target（为 0），
+// runner 用 mpChatTarget 兜底（Tasks_1 兜底 1、Tasks_3 兜底 5）。只认上游 target 会让
+// 这类任务停在「等待计分」永远领不到——runner 已不再自己领奖，判定必须与它同口径。
+func taskReachedForAuto(t *upstream.Task) bool {
+	if t == nil {
+		return false
+	}
+	if taskProgressReached(t) {
+		return true
+	}
+	if !isMPTaskCode(t.TaskCode) {
+		return false
+	}
+	target := mpChatTarget(t.TaskCode, t.Target)
+	return target > 0 && t.Current >= target
+}
+
 // executeAutoTask 统一执行任务：只在服务端确认进度达标后领奖，只有服务端确认已领
 // 或领奖接口成功才返回 done。已达标未领取时先领奖，避免重复执行真实对话动作。
 func (p *Panel) executeAutoTask(a *auth.Auth, act *autoAction) (out autoTaskOutcome) {
@@ -795,7 +812,7 @@ func (p *Panel) executeAutoTask(a *auth.Auth, act *autoAction) (out autoTaskOutc
 		out.ProgressAfter = taskProgressText(before)
 		return out
 	}
-	if taskProgressReached(before) && act.TaskCode != "first_buddy" {
+	if taskReachedForAuto(before) && act.TaskCode != "first_buddy" {
 		return p.claimAutoTask(a, act, "任务已达标", before, before)
 	}
 	// ponytail: first_buddy 是例外——进度满只说明对话做过，奖励在 agreement +
@@ -828,7 +845,7 @@ func (p *Panel) executeAutoTask(a *auth.Auth, act *autoAction) (out autoTaskOutc
 		return out
 	}
 	out.ProgressAfter = taskProgressText(after)
-	out.Claimable = taskProgressReached(after)
+	out.Claimable = taskReachedForAuto(after)
 	if after.Claimed {
 		out.Status = "done"
 		out.Claimed = true

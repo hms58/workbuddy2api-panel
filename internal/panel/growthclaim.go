@@ -125,7 +125,9 @@ func (p *Panel) accountTaskClaimAll(w http.ResponseWriter, r *http.Request) {
 			continue // mp 列表是默认口径的超集，同码只能领一次
 		}
 		seen[t.TaskCode] = true
-		if !t.Claimable || t.Claimed || t.Locked {
+		// 用与执行器同口径的达标判定：mp 任务 accept 前上游 target 下发 0，
+		// 只看 t.Claimable 会把它们整批漏掉（runner 已不自己领奖，就再没人领）。
+		if t.Claimed || t.Locked || !taskReachedForAuto(&t) {
 			continue
 		}
 		c, e, cerr := p.claimTask(a, t.TaskCode)
