@@ -567,6 +567,7 @@ func main() {
 	sch.SetGrowthRunner(pn.RunGrowthQueueNow)
 	sch.SetSweepRunner(pn.RunTaskSweepNow)
 	pn.SetGrowthConcurrency(cfg.Schedule.GrowthConcurrency)
+	pn.SetGrowthClaimMode(cfg.Schedule.GrowthClaimMode)
 
 	var auditLog *server.AuditLog
 	if cfg.Admin.AuditEnabled {
@@ -969,6 +970,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetNightAccountCap(newCfg.Schedule.NightAccountCap)
 	if pn != nil {
 		pn.SetGrowthConcurrency(newCfg.Schedule.GrowthConcurrency) // 排程轮次并发热生效
+		pn.SetGrowthClaimMode(newCfg.Schedule.GrowthClaimMode)     // 领奖方式热生效
 	}
 	if gw != nil {
 		gw.SetBudgetLimit(newCfg.Budget.DailyCreditLimit)

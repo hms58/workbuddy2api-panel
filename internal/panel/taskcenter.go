@@ -365,7 +365,7 @@ func (q *queueState) isRunning() bool {
 
 // summaryLocked 本轮结果摘要（须持 q.mu）：状态计数 + 领奖合计 + 耗时 + 失败项代号。
 func (q *queueState) summaryLocked(dur time.Duration) string {
-	var done, skipped, failed, awaiting, claimPending int
+	var done, skipped, failed, awaiting, claimPending, claimManual int
 	var credit, energy int64
 	var bad []string
 	for _, it := range q.items {
@@ -383,6 +383,8 @@ func (q *queueState) summaryLocked(dur time.Duration) string {
 			awaiting++
 		case "claim_pending":
 			claimPending++
+		case "claim_manual":
+			claimManual++
 		}
 		credit += it.Credit
 		energy += it.Energy
@@ -394,6 +396,9 @@ func (q *queueState) summaryLocked(dur time.Duration) string {
 	}
 	if claimPending > 0 {
 		s += fmt.Sprintf(" · 领奖待重试 %d", claimPending)
+	}
+	if claimManual > 0 {
+		s += fmt.Sprintf(" · 待领取 %d", claimManual)
 	}
 	if len(bad) > 0 {
 		s += " · 失败项 " + strings.Join(bad, ",")
