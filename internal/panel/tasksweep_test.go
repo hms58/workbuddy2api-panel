@@ -146,7 +146,11 @@ func sweepPanel(t *testing.T, f *sweepFake, accounts ...*auth.Auth) *Panel {
 	for _, a := range accounts {
 		p.Add(a)
 	}
-	return New(Config{Pool: p, Upstream: up})
+	pn := New(Config{Pool: p, Upstream: up})
+	// 清扫的既有断言覆盖「补领」，固定 auto；manual 下只 accept 的用例见
+	// TestTaskSweepManualModeOnlyAccepts。
+	pn.SetGrowthClaimMode(claimModeAuto)
+	return pn
 }
 
 // 待接受的任务被接受、达标未领的被领（默认口径与 mp 口径分开提交；mp 专属码走 mp 头）。

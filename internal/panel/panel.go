@@ -153,6 +153,9 @@ type Panel struct {
 	// growthConc 排程轮次的账号间并发（config schedule.growth_concurrency，热生效）。
 	// 0 = 未配置 → 1。
 	growthConc atomic.Int64
+	// growthClaimMode 成长任务领奖模式（0 = manual，1 = auto）。热生效：面板保存配置
+	// 与启动装配都调 SetGrowthClaimMode，运行期只读。
+	growthClaimMode atomic.Int64
 	// notifier 排程轮次结束后的汇总通知出口（main 装配期注入 alerting webhook；
 	// nil = 只落面板日志）。装配期设定、运行期只读，不需要锁。
 	notifier func(string)
