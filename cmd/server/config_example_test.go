@@ -44,6 +44,10 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if c.Models.Allowed == nil {
 		t.Error("models.allowed 示例应存在（空数组即可），否则用户不知道有白名单开关")
 	}
+	// 成长任务领奖模式：示例必须可见，否则用户不知道可以「完成不领」。
+	if c.Schedule.GrowthClaimMode != "manual" {
+		t.Errorf("schedule.growth_claim_mode 示例值应为 manual，得到 %q", c.Schedule.GrowthClaimMode)
+	}
 }
 
 // TestConfigExampleHasModelGroups 示例配置必须带上 model_groups 段：
