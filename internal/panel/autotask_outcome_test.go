@@ -75,6 +75,9 @@ func newAutoTaskTestPanel(t *testing.T, current, target int64, acceptStatus stri
 	client.HTTP = &http.Client{Timeout: 2 * time.Second}
 	client.ChatBaseCN, client.WebBaseCN, client.BillingBaseCN = server.URL, server.URL, server.URL
 	p := New(Config{Upstream: client})
+	// 既有用例断言的是「达标即领」的旧行为，显式钉住 auto；手动模式的行为由
+	// growthclaim_test.go 覆盖。
+	p.SetGrowthClaimMode(claimModeAuto)
 	a := &auth.Auth{UID: "autotask-test", AccessToken: "token"}
 	return p, a, state
 }

@@ -1551,6 +1551,7 @@ const CFG_MAP = {
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
   growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   growth_concurrency: ['schedule', 'growth_concurrency'],
+  growth_claim_mode: ['schedule', 'growth_claim_mode'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
   blackcat_hours: ['schedule', 'blackcat_hours'], blackcat_enabled: ['schedule', 'blackcat_enabled'],
   keepalive_hours: ['schedule', 'keepalive_hours'], keepalive_enabled: ['schedule', 'keepalive_enabled'],
@@ -1983,7 +1984,7 @@ function taskOutcomeStatus(item) {
 }
 
 function taskResultSummary(results) {
-  const counts = { done: 0, skipped: 0, error: 0, awaiting_progress: 0, claim_pending: 0, accepted: 0 };
+  const counts = { done: 0, skipped: 0, error: 0, awaiting_progress: 0, claim_pending: 0, claim_manual: 0, accepted: 0 };
   for (const item of results || []) {
     const state = taskOutcomeStatus(item);
     if (Object.prototype.hasOwnProperty.call(counts, state)) counts[state]++;
@@ -1993,6 +1994,7 @@ function taskResultSummary(results) {
   if (counts.accepted) parts.push('报名已提交 ' + counts.accepted + ' 批');
   if (counts.awaiting_progress) parts.push('等待计分 ' + counts.awaiting_progress + ' 项');
   if (counts.claim_pending) parts.push('领奖待重试 ' + counts.claim_pending + ' 项');
+  if (counts.claim_manual) parts.push('待领取 ' + counts.claim_manual + ' 项');
   if (counts.skipped) parts.push('跳过 ' + counts.skipped + ' 项');
   if (counts.error) parts.push('失败 ' + counts.error + ' 项');
   return { message: parts.join('，'), severity: counts.error || counts.claim_pending ? 'err' : counts.awaiting_progress || counts.skipped || !counts.done ? '' : 'ok' };
@@ -2059,6 +2061,7 @@ function openTasks(uid) {
   taskUID = uid;
   taskCapabilities = { accept: false, claim: false, automate: false };
   $('btnTaskAcceptAll').hidden = true;
+  $('btnTaskClaimAll').hidden = true;
   $('btnTaskAutoAll').hidden = true;
   $('taskNote').hidden = true;
   $('taskJobView').hidden = true;
@@ -2094,6 +2097,25 @@ $('btnTaskAcceptAll').onclick = async () => {
     }
   } catch (e) { toast(e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '全部接受'; loadTasks(); }
+};
+
+// 全部领取：把该账号攒下的「已达标未领」奖励一次性领掉。
+// 完成与领奖拆两步后（growth_claim_mode=manual），定时轮次不领奖，靠这个入口收积分。
+$('btnTaskClaimAll').onclick = async () => {
+  if (!taskUID) return;
+  const btn = $('btnTaskClaimAll');
+  btn.disabled = true; btn.textContent = '领取中…';
+  try {
+    const r = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks/claim_all', { method: 'POST' });
+    const n = r.claimed || 0;
+    const gain = (r.credit ? r.credit + ' 分' : '') + (r.energy ? ' +' + r.energy + ' 能' : '');
+    if (r.failed && r.failed.length) {
+      toast(`已领取 ${n} 项${gain ? '（' + gain + '）' : ''}，${r.failed.length} 项失败可重试`, 'err');
+    } else {
+      toast(n ? `已领取 ${n} 项${gain ? '（' + gain + '）' : ''}` : '没有可领取的奖励', 'ok');
+    }
+  } catch (e) { toast(e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '全部领取'; loadTasks(); }
 };
 
 // 后台执行：请求仅启动任务，页面轮询进度；关闭弹窗不影响服务端执行。
@@ -2226,6 +2248,7 @@ async function loadTasks() {
     if (taskUID !== uid) return;
     taskCapabilities = d.capabilities || { accept: d.realm !== 'global', claim: d.realm !== 'global', automate: d.realm !== 'global' };
     $('btnTaskAcceptAll').hidden = !taskCapabilities.accept;
+    $('btnTaskClaimAll').hidden = !taskCapabilities.claim;
     $('btnTaskAutoAll').hidden = !taskCapabilities.automate;
     $('taskNote').textContent = d.message || (d.realm === 'global' ? '国际区任务当前仅支持查询，请在官方客户端完成。' : '');
     $('taskNote').hidden = !$('taskNote').textContent;
@@ -2257,6 +2280,7 @@ async function loadTasks() {
     if (taskUID !== uid) return;
     taskCapabilities = { accept: false, claim: false, automate: false };
     $('btnTaskAcceptAll').hidden = true;
+    $('btnTaskClaimAll').hidden = true;
     $('btnTaskAutoAll').hidden = true;
     st.className = 'state err';
     st.textContent = e.message;
@@ -2347,7 +2371,7 @@ function groupItems(d) {
   }
   return groups;
 }
-const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', awaiting_progress: '等待计分', claim_pending: '领奖待重试', accepted: '已接受' };
+const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', awaiting_progress: '等待计分', claim_pending: '领奖待重试', claim_manual: '待领取', accepted: '已接受' };
 function taskProgressLabel(value) {
   const progress = String(value ?? '').trim();
   return /^\d+(?:\s*\/\s*\d+)?$/.test(progress) ? progress : '—';

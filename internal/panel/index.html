@@ -1458,6 +1458,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <label class="fld"><span class="lb">账号间并发</span>
                   <input name="growth_concurrency" type="number" min="1" max="4" placeholder="1">
                   <span class="hint">1-4；调高更快，上游风控暴露面更大</span></label>
+                <label class="fld"><span class="lb">领奖方式</span>
+                  <select name="growth_claim_mode">
+                    <option value="manual">manual — 完成不领，留到面板手动领取</option>
+                    <option value="auto">auto — 达标即领</option>
+                  </select>
+                  <span class="hint">manual 下积分攒着等人工领；活动任务剩余不足 24 小时时两种模式都会自动领取，避免过期。</span></label>
               </div>
               <div>
                 <div class="switch"><span class="lb">夜猫子</span>
@@ -1855,6 +1861,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <footer>
       <span class="grow"></span>
       <button id="btnTaskAcceptAll">全部接受</button>
+      <button id="btnTaskClaimAll">全部领取</button>
       <button id="btnTaskAutoAll" class="primary">后台完成可自动任务</button>
       <button id="btnTaskReload">重新查询</button>
       <button id="btnCloseTask">关闭</button>

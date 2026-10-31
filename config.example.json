@@ -41,6 +41,7 @@
     "blackcat_enabled": true,
     "growth_enabled": true,
     "growth_concurrency": 1,
+    "growth_claim_mode": "manual",
     "jitter_minutes": 0,
     "account_spread_minutes": 0,
     "account_spread_min_gap_seconds": 0,

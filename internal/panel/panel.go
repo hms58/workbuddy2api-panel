@@ -153,6 +153,9 @@ type Panel struct {
 	// growthConc 排程轮次的账号间并发（config schedule.growth_concurrency，热生效）。
 	// 0 = 未配置 → 1。
 	growthConc atomic.Int64
+	// growthClaimMode 成长任务领奖模式（0 = manual，1 = auto）。热生效：面板保存配置
+	// 与启动装配都调 SetGrowthClaimMode，运行期只读。
+	growthClaimMode atomic.Int64
 	// notifier 排程轮次结束后的汇总通知出口（main 装配期注入 alerting webhook；
 	// nil = 只落面板日志）。装配期设定、运行期只读，不需要锁。
 	notifier func(string)
@@ -305,6 +308,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
 	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.checkUpdate))
 	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.installUpdate))
+	// 成长任务人工领取（growthclaim.go）：完成与领奖拆两步后，领奖走面板按钮。
+	p.growthClaimRoutes()
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

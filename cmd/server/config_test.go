@@ -1097,3 +1097,39 @@ func TestPeriodicJitterPermillConfig(t *testing.T) {
 		t.Fatalf("env override: %+v", c2.Schedule)
 	}
 }
+
+// TestGrowthClaimModeDefaultIsManual 缺省手动领取；非法值 fail fast（静默回落会把
+// 用户的显式选择吃掉）。
+func TestGrowthClaimModeDefaultIsManual(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Schedule.GrowthClaimMode != "manual" {
+		t.Fatalf("缺省 growth_claim_mode=%q want manual", c.Schedule.GrowthClaimMode)
+	}
+}
+
+func TestGrowthClaimModeRejectsUnknownValue(t *testing.T) {
+	raw := []byte(`{"schedule":{"growth_claim_mode":"AUTO"}}`)
+	if _, err := ParseConfig(raw); err == nil {
+		t.Fatal("非法 growth_claim_mode 应报错")
+	}
+	for _, ok := range []string{"manual", "auto"} {
+		c, err := ParseConfig([]byte(`{"schedule":{"growth_claim_mode":"` + ok + `"}}`))
+		if err != nil {
+			t.Fatalf("%q 应合法: %v", ok, err)
+		}
+		if c.Schedule.GrowthClaimMode != ok {
+			t.Fatalf("解析后=%q want %q", c.Schedule.GrowthClaimMode, ok)
+		}
+	}
+	// 空串回落 manual（老配置删掉该键同义）。
+	c, err := ParseConfig([]byte(`{"schedule":{"growth_claim_mode":""}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.GrowthClaimMode != "manual" {
+		t.Fatalf("空串应回落 manual，got %q", c.Schedule.GrowthClaimMode)
+	}
+}

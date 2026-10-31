@@ -453,6 +453,7 @@ curl -s http://localhost:7863/v1/messages \
 | `schedule.blackcat_hours` | `[23]` | 每日本地时区整点夜猫子补足（23:00–08:00 计数窗口） |
 | `schedule.growth_hours` | `[11]` | 每日本地时区整点自动跑一遍**成长任务队列**（任务中心待办：扫描 → accept → 动作 → 达标领奖） |
 | `schedule.growth_concurrency` | `1` | 排程轮次的账号间并发（1-4，>4 启动报错）；越高越快，上游风控暴露面越大 |
+| `schedule.growth_claim_mode` | `manual` | 成长任务领奖模式：`manual`（默认）定时轮次只完成动作，积分留到面板「领取 / 全部领取」；`auto` 恢复旧行为（达标即领）。活动任务剩余不足 24 小时时两种模式都自动领，避免过期；非法值启动报错 |
 | `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
 | `schedule.activity_enabled` | `true` | 活跃上报总开关 |
@@ -655,6 +656,8 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 - **结果汇总**：排程轮次跑完写一行面板日志（`第 N 轮 X 项：完成 a / 跳过 b / 失败 c · 领奖 p 分 +q 能 · 耗时 t · 失败项 CODE`），并在 `alerting.enabled` 打开时**推同一条到告警 webhook**（`event=notify`）；未配 alerting 就只落日志。手动轮次不推送（界面在看，别刷通知）
 - 手动补跑：面板任务中心的「执行队列」按钮，或 `POST /admin/tasks/growth/run`（需 `admin.enabled`）
 - 关闭：`schedule.growth_enabled: false`（只关排程，任务中心手动入口照旧可用）
+
+> **完成与领奖已拆成两步**：`schedule.growth_claim_mode=manual`（默认）下，定时轮次只推进任务进度、不领取积分——官方奖励积分只有一个月有效期，做完立刻领等于提前开始倒计时。需要时在面板任务弹窗点「领取」或「全部领取」。启动与新账号登录都不再自动跑成长任务，一律等 `growth_hours` 的定时时点。
 
 #### 禁用账号与保号任务（`schedule.include_disabled_in_tasks`）
 
