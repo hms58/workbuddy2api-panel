@@ -6,6 +6,7 @@
 package panel
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -55,11 +56,17 @@ func (p *Panel) RunTaskSweepNow() (int, string) {
 // 上游返回 already_claimed → 0 分 0 能），所以逐条失败只记 WARN 不中断，宁可多试一轮。
 func (p *Panel) sweepAccount(a *auth.Auth) (accepted, claimed int, err error) {
 	label := logfmt.Label(a.UID, a.Nickname)
-	tasks, err := p.cfg.Upstream.ListTasks(a)
+	// 批量缓存：预取两口径列表（本轮 accept/claim 共享，整轮只发 web+mp 各 1 次
+	// 列表请求），轮末清除；预取失败不阻塞（读回落实时拉取，旧行为）。
+	if _, perr := p.ListALLTasks(context.Background(), a); perr != nil {
+		log.Printf("WARN: 补领清扫 %s 预取任务列表: %v", label, perr)
+	}
+	defer p.clearAccountTaskList(a.UID)
+	tasks, err := p.ListTasks(a)
 	if err != nil {
 		return 0, 0, err
 	}
-	mp, mpErr := p.cfg.Upstream.ListTasksMP(a)
+	mp, mpErr := p.ListTasksMP(a)
 	if mpErr != nil {
 		log.Printf("WARN: 补领清扫 %s mp 列表: %v", label, mpErr)
 	}

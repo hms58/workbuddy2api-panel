@@ -279,10 +279,16 @@ var mpTaskCodes = map[string]bool{
 func isMPTaskCode(code string) bool { return mpTaskCodes[code] }
 
 // taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
+// 批量轮次（缓存已建立，见 growthclaim.go）优先批量缓存：缓存内落空即
+// 「账号无此任务」，不回源——整轮只发 web+mp 各 1 次列表请求。缓存未建立时
+// 保持实时拉取（单任务手动入口语义不变）。动作后的异步计分回读必须走
+// taskByCodeLive（缓存里是动作前的旧进度）。
 // 双口径：mp 专属任务在默认列表查不到，自动回落 mp 列表（仅对已登记的 mp 码，
 // 未知码不多打一次上游）。
 func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
-	tasks, err := p.cfg.Upstream.ListTasks(a)
+	// 走缓存封装：无缓存/缓存无 CN 口径时等价直连；有条目时命中缓存 CN 列表
+	// （mp 专属码必不在其中，循环落空后由 taskByCodeMP 兜实时 MP），省一次请求。
+	tasks, err := p.ListTasks(a)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +315,7 @@ var (
 // taskByCodeWaiting 回读任务，若未达标则在有界预算内轮询等待（上游异步计分）。
 // 已达标（claimable）立即返回；预算耗尽返回最后一次结果（可能仍未达标）。
 func (p *Panel) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.Task, error) {
-	t, err := p.taskByCode(a, code)
+	t, err := p.taskByCodeLive(a, code)
 	if err != nil || t == nil {
 		return t, err
 	}
@@ -318,7 +324,7 @@ func (p *Panel) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.Task, er
 	}
 	for i := 1; i < claimPollAttempts; i++ {
 		time.Sleep(claimPollGap)
-		t2, err2 := p.taskByCode(a, code)
+		t2, err2 := p.taskByCodeLive(a, code)
 		if err2 != nil {
 			return t, err2 // 回读失败不能把旧进度当作本轮已确认结果
 		}
@@ -334,8 +340,10 @@ func (p *Panel) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.Task, er
 
 // taskByCodeMP 以小程序口径拉取任务列表并定位单个任务；未找到返回 nil。
 // 小程序限定任务（Sequential_Tasks_*）在默认口径列表不出现。
+// 批量缓存命中时只查缓存（落空即账号无此任务，不回源）；否则实时拉取。
+// 计分回读 / accept 登记验证走 taskByCodeMPLive。
 func (p *Panel) taskByCodeMP(a *auth.Auth, code string) (*upstream.Task, error) {
-	tasks, err := p.cfg.Upstream.ListTasksMP(a)
+	tasks, err := p.ListTasksMP(a)
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +365,7 @@ func (p *Panel) acceptWithVerifyMP(a *auth.Auth, code string) bool {
 			continue
 		}
 		time.Sleep(mpActionGap)
-		t, err := p.taskByCodeMP(a, code)
+		t, err := p.taskByCodeMPLive(a, code)
 		if err == nil && t != nil && t.AcceptStatus != "not_accepted" && t.AcceptStatus != "" {
 			return true
 		}
@@ -424,7 +432,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string) (string, error) {
 		// accept 前的任务进度为 null（target 下发 0），兜底 target=1 会少报——
 		// Tasks_6 首轮实测：accept 后真实 target=10，只补 1 条就误判达标去领奖
 		// （claim 400 task not completed）。接受后回读一次拿真实 target/current。
-		if t2, err := p.taskByCodeMP(a, code); err == nil && t2 != nil {
+		if t2, err := p.taskByCodeMPLive(a, code); err == nil && t2 != nil {
 			t = t2
 		}
 	}
@@ -447,7 +455,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string) (string, error) {
 	// 回读（异步计分，有界轮询复用 claimPoll 预算的紧凑版：两轮各隔 3s）。
 	for i := 0; i < 2; i++ {
 		time.Sleep(claimPollGap)
-		t2, err2 := p.taskByCodeMP(a, code)
+		t2, err2 := p.taskByCodeMPLive(a, code)
 		if err2 != nil || t2 == nil {
 			continue
 		}
@@ -522,7 +530,7 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 	// 回读（两轮各隔 3s）；未点亮且有 fallback 时补报一轮再读。
 	for round := 0; round < 2; round++ {
 		time.Sleep(claimPollGap)
-		t2, err2 := p.taskByCodeMP(a, code)
+		t2, err2 := p.taskByCodeMPLive(a, code)
 		if err2 != nil || t2 == nil {
 			continue
 		}
@@ -637,7 +645,7 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	// 回读（异步计分，两轮各隔 3s——与 runMPMiniChatTask 同预算）。
 	for i := 0; i < 2; i++ {
 		time.Sleep(claimPollGap)
-		t2, err2 := p.taskByCodeMP(a, code)
+		t2, err2 := p.taskByCodeMPLive(a, code)
 		if err2 != nil || t2 == nil {
 			continue
 		}
@@ -1447,11 +1455,16 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 	if ctx.Err() != nil {
 		return out
 	}
+	// 批量轮次：阶段 0/0b 的两次列表拉取兼作缓存预取（growthclaim.go 的缓存约定
+	// ——轮内 taskByCode 全部命中缓存，整轮只发 web+mp 各 1 次列表请求），
+	// 轮末清除该账号条目，不影响下一轮取新。
+	defer p.clearAccountTaskList(a.UID)
 
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
 	emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
 	if ctx.Err() == nil {
 		if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil && ctx.Err() == nil {
+			p.mergeTaskLists(a.UID, tasks, nil)
 			codes := acceptPendingCodes(tasks)
 			if len(codes) > 0 && ctx.Err() == nil {
 				emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
@@ -1483,6 +1496,7 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 		emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受-mp)"})
 		if ctx.Err() == nil {
 			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil && ctx.Err() == nil {
+				p.mergeTaskLists(a.UID, nil, mpTasks)
 				mpCodes := acceptPendingCodes(mpTasks)
 				if len(mpCodes) > 0 && ctx.Err() == nil {
 					emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受-mp)"})

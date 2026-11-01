@@ -9,6 +9,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -55,7 +56,7 @@ func (p *Panel) scanAccountGrowth(a *auth.Auth) scanAccountItem {
 		return it
 	}
 	var errors []string
-	if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
+	if tasks, err := p.ListTasks(a); err != nil {
 		errors = append(errors, "list tasks: "+err.Error())
 	} else {
 		for _, t := range tasks {
@@ -66,7 +67,7 @@ func (p *Panel) scanAccountGrowth(a *auth.Auth) scanAccountItem {
 	}
 	// 小程序任务与默认任务分别读取。即使其中一路失败，也保留另一路结果并
 	// 明确标记扫描不完整，避免“没有待办”被误解成所有任务都已完成。
-	if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err != nil {
+	if mpTasks, err := p.ListTasksMP(a); err != nil {
 		errors = append(errors, "list MP tasks: "+err.Error())
 	} else {
 		seen := make(map[string]bool, len(it.Growth))
@@ -447,6 +448,12 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				return
 			}
 			defer p.unlockAccount(one.a.UID)
+			// 批量缓存：预取两口径任务列表（accept 与各待办的初始读共享，整轮只发
+			// web+mp 各 1 次列表请求），账号轮末清除。预取失败不阻塞（读回落实时拉取）。
+			if _, perr := p.ListALLTasks(context.Background(), one.a); perr != nil {
+				log.Printf("panel: 队列预取任务列表 uid=%s: %v", one.a.UID, perr)
+			}
+			defer p.clearAccountTaskList(one.a.UID)
 			// 前置：批量接受尚未接受的任务。上游对 not_accepted 的任务不计数——
 			// 面板「一键完成」一直有这步，队列路径此前漏了（表现为上报 200 但进度
 			// 一直 not_accepted、无法领奖）。失败不阻塞（行为事件才是进度判据）。
@@ -517,7 +524,7 @@ func (p *Panel) queueSet(q *queueState, uid string, fn func(*queueItem)) {
 
 // acceptPendingTasks 批量接受该账号未接受的任务，返回接受的个数（失败返回 0 不阻塞）。
 func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
-	tasks, err := p.cfg.Upstream.ListTasks(a)
+	tasks, err := p.ListTasks(a) // 队列路径命中批量缓存；缓存未建立时回落实时拉取
 	if err != nil {
 		return 0
 	}
