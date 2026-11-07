@@ -128,6 +128,207 @@ func TestGroupAdvancesToNextMember(t *testing.T) {
 	}
 }
 
+// upstream5xxBody 上游 5xx 故障响应：刻意不带任何业务码/limit 文案，
+// Classify 只按 status>=500 归 ErrServer，与 6004/14003/6021 全部区分开。
+const upstream5xxBody = `{"error":{"message":"upstream temporarily unavailable","requestId":"req-5xx"}}`
+
+// TestGroupAdvancesOnUpstream5xx 核心行为：成员 1 撞上游 503 → 成员 2 成功。
+// 5xx 是上游故障，与 6004「模型级额度耗尽」同样值得换成员继续服务；单账号池
+// 换号救不了（只有这一个号），此时不推进就是客户端可见的 503。
+func TestGroupAdvancesOnUpstream5xx(t *testing.T) {
+	up := &modelAwareUpstream{}
+	up.reply = append(up.reply,
+		struct {
+			status int
+			body   string
+		}{503, upstream5xxBody},
+		struct {
+			status int
+			body   string
+		}{200, okChatSSE},
+	)
+	h := groupAwareHandler(t, []modelgroup.GroupConfig{{
+		ID: "g", Enabled: true,
+		Members: []modelgroup.MemberConfig{
+			{Model: "cn:m1", Weight: 100},
+			{Model: "cn:m2", Weight: 90},
+		},
+	}}, &modelgroup.Cache{}, up.client(), 1)
+
+	rec := doFallbackChat(h, "group:g")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200（上游 5xx 应降级到成员 2），body=%s", rec.Code, rec.Body)
+	}
+	got := up.seen()
+	want := []string{"m1", "m2"}
+	if len(got) != len(want) {
+		t.Fatalf("上游收到 %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 次上游模型 = %q, want %q（全序列 %v）", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestGroupStaysOnMemberOnUpstream5xxWhileAccountsRemain 组内还有健康号时，
+// 5xx 应优先在本成员内换号，不得因一个号失败就跳到下一个模型。
+// 与 6004 版 TestGroupStaysOnMemberWhileAccountsRemain 同约束，钉住 5xx 版。
+func TestGroupStaysOnMemberOnUpstream5xxWhileAccountsRemain(t *testing.T) {
+	up := &modelAwareUpstream{}
+	up.reply = append(up.reply,
+		struct {
+			status int
+			body   string
+		}{503, upstream5xxBody},
+		struct {
+			status int
+			body   string
+		}{200, okChatSSE},
+	)
+	h := groupAwareHandler(t, []modelgroup.GroupConfig{{
+		ID: "g", Enabled: true,
+		Members: []modelgroup.MemberConfig{
+			{Model: "cn:m1", Weight: 100},
+			{Model: "cn:m2", Weight: 90},
+		},
+	}}, &modelgroup.Cache{}, up.client(), 2)
+
+	rec := doFallbackChat(h, "group:g")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200（本成员换号即可恢复），body=%s", rec.Code, rec.Body)
+	}
+	got := up.seen()
+	want := []string{"m1", "m1"}
+	if len(got) != len(want) {
+		t.Fatalf("上游收到 %v, want %v（组内还有号就不该推进成员）", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 次上游模型 = %q, want %q（全序列 %v）", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestGroupAdvancesOnUpstream5xxAtRotateBudget 池内可服务账号数超过 MaxRotate 时，
+// 轮转预算会先于「账号试完」耗尽；此时也必须把剩余预算让给下一个成员，否则
+// 一次请求会全耗在第一个成员上，后面的成员一次都打不到。
+func TestGroupAdvancesOnUpstream5xxAtRotateBudget(t *testing.T) {
+	up := &modelAwareUpstream{}
+	for _, r := range []struct {
+		status int
+		body   string
+	}{
+		{503, upstream5xxBody},
+		{503, upstream5xxBody},
+		{503, upstream5xxBody},
+		{200, okChatSSE},
+	} {
+		up.reply = append(up.reply, struct {
+			status int
+			body   string
+		}{r.status, r.body})
+	}
+	h := groupAwareHandler(t, []modelgroup.GroupConfig{{
+		ID: "g", Enabled: true,
+		Members: []modelgroup.MemberConfig{
+			{Model: "cn:m1", Weight: 100},
+			{Model: "cn:m2", Weight: 90},
+		},
+	}}, &modelgroup.Cache{}, up.client(), 5)
+
+	rec := doFallbackChat(h, "group:g")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200（预算边界也应降级），body=%s", rec.Code, rec.Body)
+	}
+	got := up.seen()
+	want := []string{"m1", "m1", "m1", "m2"}
+	if len(got) != len(want) {
+		t.Fatalf("上游收到 %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 次上游模型 = %q, want %q（全序列 %v）", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestGroupAdvancesOnQueueFull 渠道级排队满载时换账号必撞同一堵墙（既有
+// fail-fast 依据），但换模型走的是另一条渠道队列 —— 组请求应推进到下一个
+// 成员，而不是把 503 直接甩给客户端。
+func TestGroupAdvancesOnQueueFull(t *testing.T) {
+	up := &modelAwareUpstream{}
+	up.reply = append(up.reply,
+		struct {
+			status int
+			body   string
+		}{503, `{"code":6021,"msg":"queue.full.title","requestId":"rid"}`},
+		struct {
+			status int
+			body   string
+		}{200, okChatSSE},
+	)
+	h := groupAwareHandler(t, []modelgroup.GroupConfig{{
+		ID: "g", Enabled: true,
+		Members: []modelgroup.MemberConfig{
+			{Model: "cn:m1", Weight: 100},
+			{Model: "cn:m2", Weight: 90},
+		},
+	}}, &modelgroup.Cache{}, up.client(), 1)
+
+	rec := doFallbackChat(h, "group:g")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200（queue.full 应降级到成员 2），body=%s", rec.Code, rec.Body)
+	}
+	got := up.seen()
+	want := []string{"m1", "m2"}
+	if len(got) != len(want) {
+		t.Fatalf("上游收到 %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 次上游模型 = %q, want %q（全序列 %v）", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestGroupQueueFullAllMembersReturns503 所有成员都满载时，推进到尽头仍要
+// fail-fast 503 并透传**最后一个成员**的上游原文；每个成员只打一次
+// （渠道级信号不按账号轮转，池里多少号都不会放大请求量）。
+func TestGroupQueueFullAllMembersReturns503(t *testing.T) {
+	up := &modelAwareUpstream{}
+	up.reply = append(up.reply,
+		struct {
+			status int
+			body   string
+		}{503, `{"code":6021,"msg":"queue.full.title","requestId":"rid-m1"}`},
+		struct {
+			status int
+			body   string
+		}{503, `{"code":6020,"msg":"queue.waiting.title","requestId":"rid-m2"}`},
+	)
+	h := groupAwareHandler(t, []modelgroup.GroupConfig{{
+		ID: "g", Enabled: true,
+		Members: []modelgroup.MemberConfig{
+			{Model: "cn:m1", Weight: 100},
+			{Model: "cn:m2", Weight: 90},
+		},
+	}}, &modelgroup.Cache{}, up.client(), 1)
+
+	rec := doFallbackChat(h, "group:g")
+	if rec.Code != 503 {
+		t.Fatalf("status = %d, want 503（全部满载仍 fail-fast），body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "rid-m2") {
+		t.Errorf("503 body 应透传最后一个成员的上游原文（含 requestId）: %s", rec.Body)
+	}
+	got := up.seen()
+	want := []string{"m1", "m2"}
+	if len(got) != len(want) {
+		t.Fatalf("上游收到 %v, want %v（每个成员只打一次）", got, want)
+	}
+}
+
 // TestGroupStaysOnMemberWhileAccountsRemain ⭐ 用户实测反馈的缺陷：
 // 成员内**只要有一个号**被 6004 模型级限流，整组就跳到下一个模型 —— 正确语义是
 // 「该域全部账号都服务不了这个模型」才推进成员，还剩号能服务时应在同成员内换号。
