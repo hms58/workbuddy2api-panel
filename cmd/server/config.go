@@ -130,6 +130,10 @@ type Config struct {
 		// GrowthConcurrency 排程轮次的账号间并发（缺省 1，上限 4）：与面板手动
 		// 「执行队列」同一个并发语义；调高更快的代价是上游风控暴露面。
 		GrowthConcurrency int `json:"growth_concurrency"`
+		// GrowthClaimMode 成长任务领奖模式：manual（缺省）= 定时轮次只完成动作，
+		// 积分留到面板人工领取；auto = 旧行为（达标即领）。活动任务剩余不足 24 小时时
+		// 两种模式都自动领（避免过期）。非法值启动 fail fast，空值回落 manual。
+		GrowthClaimMode string `json:"growth_claim_mode"`
 		// JitterMinutes 0 = 精确整点。正值把触发时刻摊在该窗口内，同一小时偏移固定。
 		JitterMinutes int `json:"jitter_minutes"`
 		// AccountSpreadMinutes 账号级摊开窗口（issue #45）：0 = 关闭（同一秒打全池）。
@@ -458,6 +462,8 @@ func Default() *Config {
 	c.Schedule.KeepaliveEnabled = true
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.GrowthEnabled = true
+	// 领奖方式缺省 manual：完成即领等于提前开始积分有效期倒计时。
+	c.Schedule.GrowthClaimMode = "manual"
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
 	c.Schedule.TaskSweepEnabled = true
@@ -1025,6 +1031,16 @@ func (c *Config) normalize() error {
 	}
 	if c.Schedule.GrowthConcurrency > 4 {
 		return fmt.Errorf("schedule.growth_concurrency: %d 非法（1-4，手动入口同为 4 上限）", c.Schedule.GrowthConcurrency)
+	}
+	// 领奖模式：空回落 manual（老配置无此键）；非法值 fail fast——静默回落会
+	// 把用户的显式选择吃掉，而这里选错等于「该领的没领 / 不该领的领了」。
+	if c.Schedule.GrowthClaimMode == "" {
+		c.Schedule.GrowthClaimMode = "manual"
+	}
+	switch c.Schedule.GrowthClaimMode {
+	case "manual", "auto":
+	default:
+		return fmt.Errorf("schedule.growth_claim_mode: %q 非法（manual = 完成不领，留待人工领取；auto = 达标即领）", c.Schedule.GrowthClaimMode)
 	}
 	if c.Schedule.JitterMinutes < 0 || c.Schedule.JitterMinutes > 1440 {
 		return fmt.Errorf("schedule.jitter_minutes: %d 非法（0 = 关闭，上限 1440）", c.Schedule.JitterMinutes)

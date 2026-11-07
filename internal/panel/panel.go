@@ -153,9 +153,20 @@ type Panel struct {
 	// growthConc 排程轮次的账号间并发（config schedule.growth_concurrency，热生效）。
 	// 0 = 未配置 → 1。
 	growthConc atomic.Int64
+	// growthClaimMode 成长任务领奖模式（0 = manual，1 = auto）。热生效：面板保存配置
+	// 与启动装配都调 SetGrowthClaimMode，运行期只读。
+	growthClaimMode atomic.Int64
 	// notifier 排程轮次结束后的汇总通知出口（main 装配期注入 alerting webhook；
 	// nil = 只落面板日志）。装配期设定、运行期只读，不需要锁。
 	notifier func(string)
+
+	// accountTaskListMap 成长任务批量轮次的任务列表缓存：uid → 两口径列表
+	// （growthclaim.go 的 taskListWrap）。批量开始时预取（ListALLTasks），
+	// 轮内 taskByCode / ListTasks / ListTasksMP 全部读缓存（整轮只发 web+mp
+	// 各 1 次列表请求），轮末 clearAccountTaskList 清除该账号条目。
+	// 并发账号间互不覆盖，读写走 accountTaskListMu。
+	accountTaskListMap map[string]taskListWrap
+	accountTaskListMu  sync.Mutex
 }
 
 // SetGrowthConcurrency 设置排程轮次的账号间并发（1-4；<=0 视为默认 1）。面板保存配置时热改。
@@ -305,6 +316,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
 	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.checkUpdate))
 	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.installUpdate))
+	// 成长任务人工领取（growthclaim.go）：完成与领奖拆两步后，领奖走面板按钮。
+	p.growthClaimRoutes()
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

@@ -1093,6 +1093,38 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			unbindSticky()
 		}
 	}
+	// advanceMember 推进到组内下一个可见成员，并把本轮请求状态切过去。
+	// 返回 false = 没有下一个成员（或非组请求），调用方按原路径处理。
+	//
+	// 与 6004 / 选号失败两处推进样板同构；抽成闭包是因为 5xx 与 queue.full
+	// 两个分支都要用，避免同一段状态切换代码再复制两份。
+	// 只释放租约、不解绑粘性：换的是模型，同一账号仍应有机会。
+	advanceMember := func(reason string) bool {
+		if chain == nil {
+			return false
+		}
+		chain.markCurrentTried()
+		if !chain.advance(time.Now()) {
+			return false
+		}
+		if m, ok := chain.current(); ok {
+			realm, bareModel = m.Realm, m.Bare
+		}
+		curModel = bareModel
+		st.usedModel = realm + ":" + bareModel
+		tried = map[string]bool{}
+		busyWaited = false
+		releaseHeld()
+		var obj map[string]any
+		if json.Unmarshal(body, &obj) == nil {
+			obj["model"] = curModel
+			if nb, merr := json.Marshal(obj); merr == nil {
+				body = nb
+			}
+		}
+		log.Printf("model group %s: advance to %s:%s (%s)", chain.groupID, realm, bareModel, reason)
+		return true
+	}
 	// ttfb 首 token 等待（仅流式有观测；非流式传 0 = 无观测，速率不扣减）。
 	// 显式入参而不是读 st.ttfb：后者在流式分支里是**调用之后**才赋值的，
 	// 靠顺序传递会让将来重排代码时静默把速率算回旧的错口径（吸收上游 8b18ab8）。
@@ -1573,14 +1605,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
-			// 6021「queue.full.title」渠道级容量满载：不罚号不轮转，立即透传上游原文
-			//（503 + upstream_busy，含 requestId）。上游集群排队打满时换任何账号都撞
-			// 同一堵墙——按限流处置会逐号软冷却、与全冷却兜底互相喂成整池停摆
-			//（2026-10-15 实案：18 次全落 soft_rate），且换号把无效请求放大
-			// MaxRotate 倍。客户端按 SDK 退避重试即可；Retry-After 是本地兜底
-			//（上游未给重置口径时按 5s 提示，PR #180 同款）。
+			// 6021「queue.full.title」/ 6020「queue.waiting.title」渠道级容量满载。
+			//
+			// 换账号必撞同一堵墙（既有依据：按限流处置会逐号软冷却、与全冷却兜底
+			// 互相喂成整池停摆，2026-10-15 实案 18 次全落 soft_rate），故不做账号
+			// 轮转；但换**模型**走的是另一条渠道队列，组请求应推进到下一个优先级
+			// 成员（非组请求 chain==nil，保持原 fail-fast）。
+			//
+			// 推进到尽头仍回 503 + upstream_busy + 上游原文（含 requestId）；
+			// Retry-After 是本地兜底（上游未给重置口径时按 5s 提示，PR #180 同款）。
 			if kind == upstream.ErrUpstreamBusy {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				if advanceMember("queue.full on previous member") {
+					continue
+				}
 				fail(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
@@ -1648,6 +1686,32 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 也没配等价模型的情形）—— 再罚一次会让冷却时长/连败计数翻倍。
 			if !penalized {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+			}
+			// 组请求：上游 5xx（ErrServer）同样是「当前成员服务不了」的信号，推进到
+			// 下一个优先级成员继续，而不是原地报 503。
+			//
+			// 判据与 6004 分支不同：ErrServer 只喂熔断计数（NoteError），不写模型级
+			// 冷却，ServableFor 的 Count 不会像 6004 那样归零；故改用「本成员换号
+			// 预算（可服务账号数与 MaxRotate 取小）是否用满」。这也保留了「组内
+			// 还有号就先换号」的既有约束——一个号 5xx 就跳模型会把高优成员剩下
+			// 的额度闲置。
+			//
+			// 6020/6021 queue.full 在上方 ErrUpstreamBusy 分支自行推进，走不到这里；
+			// 非组请求 chain==nil 亦零回归。
+			// 5xx 是瞬时故障，刻意不写 markMemberLocked（模型级锁会污染缓存/面板）。
+			if chain != nil && kind == upstream.ErrServer {
+				info := h.cfg.Pool.ServableFor(realm, bareModel)
+				// rotateCap 按「每成员 MaxRotate 次」分配；池比预算大时必须按预算
+				// 推进，否则预算会全耗在第一个成员上，后面的成员一次都打不到。
+				memberQuota := info.Count
+				if memberQuota > h.cfg.MaxRotate {
+					memberQuota = h.cfg.MaxRotate
+				}
+				if info.Count == 0 || len(tried) >= memberQuota {
+					if advanceMember("upstream 5xx on previous member") {
+						continue
+					}
+				}
 			}
 			fail(acct.UID)
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
