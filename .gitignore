@@ -12,6 +12,8 @@ data/
 /credit
 /wb2api
 /signin_bin
+# 本地构建输出目录（二进制不进版本库，见 README「构建全部二进制」）
+/bin/
 
 # Config with secrets (use config.example.json)
 config.json

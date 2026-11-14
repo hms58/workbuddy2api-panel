@@ -199,6 +199,9 @@ process.stdout.write(JSON.stringify({
   chineseFail: ctx.logLevel('panel: disable uid=x（人工禁用）失败'),
   warn: ctx.logLevel('pool: uid=x 冷却中'),
   plain: ctx.logLevel('panel: task auto uid=x status=done'),
+  fullOk: ctx.logLevel('panel: task auto uid=x code=chat_5 status=done action=run progress=5/5->5/5 claimed=true reward=+100c+5e dur=1.2s reason="已自动领奖" claim_error=""'),
+  claimOk: ctx.logLevel('panel: task claim uid=x code=chat_5 via=auto mode=auto result=ok +100c+5e err=""'),
+  claimFail: ctx.logLevel('panel: task claim uid=x code=chat_5 via=sweep mode=manual result=fail +0c+0e err="task not completed"'),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "log-level-*.cjs")
 	if err != nil {
@@ -212,9 +215,48 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("log level node test failed: %v\n%s", err, out)
 	}
-	const want = `{"okTask":"","twoEmpty":"","realFail":" e","realBalanceErr":" e","chineseFail":" e","warn":" w","plain":""}`
+	const want = `{"okTask":"","twoEmpty":"","realFail":" e","realBalanceErr":" e","chineseFail":" e","warn":" w","plain":"","fullOk":"","claimOk":"","claimFail":" e"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("log level=%s want %s", out, want)
+	}
+}
+
+// 运行日志每行必须带日期：入环时行首日期时间已被剥掉（ring.tsPrefixRe），
+// 只渲染时分秒会让「今天的日志」与「前几天恢复的日志」无法区分。
+func TestAppJSLogStampHasDate(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; log stamp test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function logStamp');
+const end = src.indexOf('async function loadLogs');
+if (start < 0 || end < 0) throw new Error('logStamp not found');
+const ctx = { String };
+vm.createContext(ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) + '\nthis.logStamp=logStamp;', ctx);
+process.stdout.write(JSON.stringify({
+  // 不带 Z 的 ISO 串按本地时区解析，断言与时区无关。
+  iso: ctx.logStamp('2026-11-14T15:04:05'),
+  bad: ctx.logStamp('not-a-date'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "log-stamp-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("log stamp node test failed: %v\n%s", err, out)
+	}
+	const want = `{"iso":"2026-11-14 15:04:05","bad":""}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("log stamp=%s want %s", out, want)
 	}
 }
 

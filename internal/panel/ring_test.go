@@ -76,6 +76,7 @@ func TestRingRetainsTaskDuringChatFloodAndRestores(t *testing.T) {
 	if counts[ChTask] != 1 || counts[ChChat] != 5 {
 		t.Fatalf("channels=%v", counts)
 	}
+	r.Flush() // 落盘是去抖的（taskaudit.go）：断言文件内容前先同步一次
 	restored := NewRing(5)
 	if err := restored.SetTaskArchive(archive); err != nil {
 		t.Fatal(err)
@@ -87,6 +88,7 @@ func TestRingRetainsTaskDuringChatFloodAndRestores(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		restored.Write([]byte(fmt.Sprintf("panel: 任务 result %d\n", i)))
 	}
+	restored.Flush()
 	restarted := NewRing(5)
 	if err := restarted.SetTaskArchive(archive); err != nil {
 		t.Fatal(err)
@@ -109,6 +111,7 @@ func TestRingPersistenceFailureStillRetainsLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	n, err := r.Write([]byte("panel: 任务 result\n"))
+	r.Flush() // 去抖窗口内不会自己落盘，这里同步触发才能看到写盘失败
 	if err != nil || n == 0 || len(r.Snapshot()) != 1 || r.ArchiveError() == "" {
 		t.Fatalf("n=%d err=%v archive=%q", n, err, r.ArchiveError())
 	}
