@@ -460,6 +460,8 @@ func (m *taskJobManager) run(uid, jobID string, a *auth.Auth) {
 		log.Printf("panel: 保存后台任务运行状态 uid=%s: %v", uid, err)
 	}
 	m.mu.Unlock()
+	// 一轮作业的起点（审计日志，实现见 taskaudit.go）。
+	m.panel.logTaskJobStart(uid, jobID, job)
 
 	jobCtx, cancelJob := context.WithCancel(m.ctx)
 	defer cancelJob()
@@ -533,6 +535,8 @@ func (m *taskJobManager) finish(uid, jobID, status, message string) {
 	if err := m.persistLocked(); err != nil {
 		log.Printf("panel: 保存后台任务结束状态 uid=%s: %v", uid, err)
 	}
+	// 一轮作业的终点：结果分布 + 累计奖励 + 耗时（审计日志，见 taskaudit.go）。
+	m.panel.logTaskJobDone(uid, jobID, job, message)
 }
 
 func (m *taskJobManager) evictOldestLocked() (string, TaskJob) {

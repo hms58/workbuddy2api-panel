@@ -703,8 +703,6 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	}
 	defer p.unlockAccount(uid)
 	outcome := p.executeAutoTask(a, act)
-	log.Printf("panel: 任务动作 uid=%s code=%s status=%s progress %s -> %s claimed=%v",
-		uid, act.TaskCode, outcome.Status, outcome.ProgressBefore, outcome.ProgressAfter, outcome.Claimed)
 	writeJSON(w, http.StatusOK, outcome.resultMap(act))
 }
 
@@ -781,10 +779,10 @@ func (p *Panel) executeAutoTask(a *auth.Auth, act *autoAction) (out autoTaskOutc
 	if a != nil {
 		uid = a.UID
 	}
+	start := time.Now()
 	defer func() {
-		log.Printf("panel: task auto uid=%s code=%s status=%s progress=%s->%s claimed=%v claim_error=%q",
-			uid, taskCode, out.Status, truncateStr(out.ProgressBefore, 64),
-			truncateStr(out.ProgressAfter, 64), out.Claimed, truncateStr(out.ClaimError, 180))
+		// 逐项审计日志（格式与字段见 taskaudit.go）：完成 / 跳过 / 领奖都从这里出。
+		p.logTaskOutcome(uid, taskCode, out, time.Since(start))
 	}()
 	if a == nil {
 		return autoTaskOutcome{Status: "error", Message: "账号凭证不可用"}
@@ -886,7 +884,7 @@ func (p *Panel) claimAutoTask(a *auth.Auth, act *autoAction, message string, bef
 			return out
 		}
 	}
-	credit, energy, err := p.claimTask(a, act.TaskCode)
+	credit, energy, err := p.claimTaskLogged(a, act.TaskCode, "auto")
 	if err != nil {
 		out.Status = "claim_pending"
 		out.ClaimError = err.Error()

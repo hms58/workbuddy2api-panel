@@ -131,7 +131,7 @@ func (p *Panel) accountTaskClaimAll(w http.ResponseWriter, r *http.Request) {
 		if t.Claimed || t.Locked || !taskReachedForAuto(&t) {
 			continue
 		}
-		c, e, cerr := p.claimTask(a, t.TaskCode)
+		c, e, cerr := p.claimTaskLogged(a, t.TaskCode, "manual")
 		if cerr != nil {
 			log.Printf("panel: 全部领取 uid=%s %s: %v", uid, t.TaskCode, cerr)
 			failed = append(failed, map[string]any{"task_code": t.TaskCode, "error": cerr.Error()})

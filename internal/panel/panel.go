@@ -242,7 +242,7 @@ func New(cfg Config) *Panel {
 		cfg:     cfg,
 		mux:     http.NewServeMux(),
 		started: time.Now(),
-		logs:    NewRing(500),
+		logs:    NewRing(taskLogCapacity),
 		logins:  map[string]loginSession{},
 	}
 	p.routes()

@@ -1166,16 +1166,18 @@ $('btnModels').onclick = () => loadModels(true);
 let logCh = 'all';
 // 运行日志的增量拉取状态（perf）：logRows 是本地窗口，logSinceTs 是下次增量的起点。
 // 常态每 5 秒只传新增行，不再每轮重拉 500 行（~90KB）并重建整块 DOM。
-// LOG_ROWS_MAX 与服务端环形缓冲同量级（500）——本地窗口不必更大。
+// LOG_ROWS_MAX 与服务端环形缓冲同量级（taskaudit.go 的 taskLogCapacity=3000）。
+// 3000 行每 5s 重建一次 DOM 是纯浪费，所以渲染侧另有 logRenderKey 去重。
 let logRows = [];
 let logSinceTs = null;
 let logSince = '';
-const LOG_ROWS_MAX = 500;
+let logRenderKey = '';
+const LOG_ROWS_MAX = 3000;
 // 增量游标最长有效期：超过则改全量拉（服务端环形缓冲只有 500 行，久了会淘汰
 // 中间旧行，增量就拿不到「完整的一段」）。
 const LOG_CURSOR_MAX_AGE_MS = 5 * 60 * 1000;
 // resetLogWindow 丢弃本地窗口，下次改为全量拉（切视图/手动重载时用）。
-function resetLogWindow() { logRows = []; logSinceTs = null; logSince = ''; }
+function resetLogWindow() { logRows = []; logSinceTs = null; logSince = ''; logRenderKey = ''; }
 $('logChips').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-ch]');
   if (!b) return;
@@ -1188,9 +1190,21 @@ $('logChips').addEventListener('click', ev => {
 // 整行标红；非空赋值（`claim_error="task not completed"`）仍然照常标红。
 function logLevel(text) {
   const t = String(text == null ? '' : text).replace(/\b[a-z_]+=(?:""|'')/g, '');
-  if (/error|失败|错误/.test(t)) return ' e';
+  // result=fail 是任务领取行（taskaudit.go）的失败标记，不含 error 字样。
+  if (/error|失败|错误|result=fail/.test(t)) return ' e';
   if (/warn|冷却|熔断/.test(t)) return ' w';
   return '';
+}
+
+// logStamp 日志行的时刻（YYYY-MM-DD HH:mm:ss）。
+// 为什么不用 toLocaleTimeString：入环时行首的日期时间已被剥掉（ring.tsPrefixRe），
+// 只渲染时分秒会让「今天的日志」与「前几天恢复的日志」无法区分。
+function logStamp(ts) {
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
 async function loadLogs() {
@@ -1249,15 +1263,22 @@ async function loadLogs() {
     }
     logSince = logSinceTs ? logSinceTs.toISOString() : '';
     const entries = logRows.filter(e => logCh === 'all' || e.ch === logCh);
-    setHTML(box, entries.length
-      ? entries.map(e => {
-        const lvl = logLevel(e.text);
-        const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
-        const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
-        return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
-      }).join('')
-      : '<span style="color:var(--ink-3)">暂无日志</span>');
-    if (logPin && atEnd) box.scrollTop = box.scrollHeight;
+    // 渲染去重：窗口内容没变（频道 + 条目数 + 最后一条）就不重建 DOM。
+    // 窗口有 3000 行时每 5s 重建一次纯属浪费；轮询只负责把新行并进 logRows。
+    const tail = entries.length ? entries[entries.length - 1] : null;
+    const renderKey = logCh + '|' + entries.length + '|' + (tail ? tail.ts + tail.text : '');
+    if (renderKey !== logRenderKey) {
+      logRenderKey = renderKey;
+      setHTML(box, entries.length
+        ? entries.map(e => {
+          const lvl = logLevel(e.text);
+          const t = logStamp(e.ts);
+          const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
+          return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
+        }).join('')
+        : '<span style="color:var(--ink-3)">暂无日志</span>');
+      if (logPin && atEnd) box.scrollTop = box.scrollHeight;
+    }
     const counts = {};
     for (const e of logRows) counts[e.ch] = (counts[e.ch] || 0) + 1;
     $('logNote').textContent = logCh === 'all'

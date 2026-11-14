@@ -111,14 +111,9 @@ func (p *Panel) sweepAccount(a *auth.Auth) (accepted, claimed int, err error) {
 		}
 		// mp 专属码走 mp 领奖（自带 Web 域 400 降级）；只在 mp 列表出现的码同办，
 		// 否则 Web 域对 mp 任务 400 会变成每轮一条 WARN。
-		var cerr error
-		if isMPTaskCode(t.TaskCode) || onlyMP[t.TaskCode] {
-			_, _, cerr = p.cfg.Upstream.ClaimRewardMP(a, t.TaskCode)
-		} else {
-			_, _, cerr = p.cfg.Upstream.ClaimReward(a, t.TaskCode)
-		}
+		// 领取结果与失败原因由 claimTaskLoggedMP 统一记审计日志（taskaudit.go）。
+		_, _, cerr := p.claimTaskLoggedMP(a, t.TaskCode, "sweep", isMPTaskCode(t.TaskCode) || onlyMP[t.TaskCode])
 		if cerr != nil {
-			log.Printf("WARN: 补领 %s %s: %v", label, t.TaskCode, cerr)
 			continue
 		}
 		claimed++
