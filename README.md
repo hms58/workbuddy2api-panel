@@ -513,6 +513,26 @@ curl -s http://localhost:7863/v1/messages \
 
 `WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
 
+### 任务通知（钉钉 / 企业微信）
+
+两类事件可推到群机器人：**任务活动有新任务**、**自动领取积分**（同一轮的多笔领取合并成一条，避免刷屏）。不配置即全静默，不影响任何主流程。
+
+配置入口：面板「配置」页底部的**任务通知**卡片（保存即热生效，无需重启；URL 只回显打码值，输入框留空表示不修改）。
+
+等价地也可以直接写 `task-logs.json`（默认 `data/task-logs.json`）同目录的 `notify.json`，或用同名环境变量覆盖：
+
+```json
+{
+  "dingtalk": { "url": "https://oapi.dingtalk.com/robot/send?access_token=...", "secret": "SEC..." },
+  "wecom":    { "url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." },
+  "events":   { "new_task": true, "auto_claim": true }
+}
+```
+
+- 钉钉 `secret` 对应机器人「加签」；用关键词模式时留空即可（URL 原样发出）。
+- 环境变量：`WB2A_NOTIFY_DINGTALK_URL` / `WB2A_NOTIFY_DINGTALK_SECRET` / `WB2A_NOTIFY_WECOM_URL`（优先于文件）。
+- 「新任务」按账号记住已见 `task_code`（`data/task-seen.json`），**首次见到某账号只记录不提醒**；配置改动下次启动生效。
+
 ## 核心行为语义
 
 ### 系统提示词体系

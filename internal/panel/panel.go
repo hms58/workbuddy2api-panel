@@ -313,6 +313,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/model_groups/sniff", p.withAuth(p.modelGroupsSniff))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	// 任务通知（钉钉/企业微信）配置：独立文件，实现见 tasknotify_api.go。
+	p.mux.HandleFunc("GET /panel/api/notify", p.withAuth(p.getNotifyConfig))
+	p.mux.HandleFunc("POST /panel/api/notify", p.withAuth(p.saveNotifyConfig))
+	p.mux.HandleFunc("POST /panel/api/notify/test", p.withAuth(p.testNotify))
 	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
 	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.checkUpdate))
 	p.mux.HandleFunc("POST /panel/api/update/install", p.withAuth(p.installUpdate))

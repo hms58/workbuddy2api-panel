@@ -252,6 +252,8 @@ func (p *Panel) ListALLTasks(ctx context.Context, a *auth.Auth) ([]upstream.Task
 			merged = append(merged, t)
 		}
 	}
+	// 新任务提醒（实现见 tasknotify.go；未配置 webhook 时是一次空调用）。
+	p.noteTaskList(a, merged)
 	return merged, nil
 }
 

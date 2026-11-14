@@ -191,6 +191,10 @@ func claimLogLine(uid, code, via, mode string, credit, energy int64, err error) 
 func (p *Panel) claimTaskLogged(a *auth.Auth, code, via string) (credit, energy int64, err error) {
 	credit, energy, err = p.claimTask(a, code)
 	p.logTaskClaim(a, code, via, credit, energy, err)
+	if via == "auto" && err == nil {
+		// 自动领奖的 webhook 提醒（实现见 tasknotify.go；未配置则静默）。
+		p.notifyAutoClaim(a, code, credit, energy)
+	}
 	return credit, energy, err
 }
 

@@ -460,7 +460,7 @@ function go(v) {
   // 首屏加载失败时 loadModelGroups 会抛出（供刷新按钮区分成败），
   // 这里已有「正在读取…」被替换成错误文案，吞掉即可，不要冒泡到视图切换。
   if (v === 'modelgroups' && !$('mgList').children.length) loadModelGroups().catch(() => {});
-  if (v === 'config') loadConfig();
+  if (v === 'config') { loadConfig(); loadNotify(); }
   // 切到日志视图：本地窗口为空（首次）时全量拉一次；已有窗口则继续增量。
   // 注意**不要**在每次切视图时 resetLogWindow()——那会把增量游标清掉，下一轮
   // 又变成全量拉，白白丢掉增量带来的收益。
@@ -1734,6 +1734,82 @@ $('cfgForm').onsubmit = async ev => {
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
 };
+
+/* ── 任务通知（钉钉 / 企业微信） ──────────────────────────────────────
+   配置落在 task-logs.json 同目录的 notify.json，保存即热生效；不走 config.json，
+   与上游配置结构解耦。URL 由后端打码回显，输入框留空 = 不修改。 */
+async function loadNotify() {
+  try {
+    const d = await api('notify');
+    const ding = d.dingtalk || {}, wecom = d.wecom || {}, managed = d.env_managed || {};
+    $('ntPath').textContent = d.path || '';
+    for (const id of ['ntDingUrl', 'ntDingSecret', 'ntWecomUrl']) $(id).value = '';
+    $('ntDingUrl').disabled = !!managed.dingtalk;
+    $('ntDingSecret').disabled = !!managed.dingtalk;
+    $('ntWecomUrl').disabled = !!managed.wecom;
+    $('btnNtDingClear').disabled = !!managed.dingtalk;
+    $('btnNtWecomClear').disabled = !!managed.wecom;
+    if (ding.configured) $('ntDingUrl').placeholder = ding.url;
+    $('ntDingHint').textContent = ding.configured
+      ? (managed.dingtalk ? '由环境变量托管：' : '当前：') + ding.url : '未配置';
+    $('ntDingSecretHint').textContent = ding.secret_set ? '已配置（留空不修改）' : '未配置';
+    if (wecom.configured) $('ntWecomUrl').placeholder = wecom.url;
+    $('ntWecomHint').textContent = wecom.configured
+      ? (managed.wecom ? '由环境变量托管：' : '当前：') + wecom.url : '未配置';
+    $('ntNewTask').checked = !!(d.events || {}).new_task;
+    $('ntAutoClaim').checked = !!(d.events || {}).auto_claim;
+    $('ntNote').textContent = d.enabled ? '' : '尚未配置任何通道，不会推送';
+  } catch (e) {
+    $('ntNote').textContent = '读取失败：' + e.message;
+  }
+}
+
+function notifyPayload(extra) {
+  return Object.assign({
+    dingtalk: { url: $('ntDingUrl').value.trim(), secret: $('ntDingSecret').value.trim() },
+    wecom: { url: $('ntWecomUrl').value.trim() },
+    events: { new_task: $('ntNewTask').checked, auto_claim: $('ntAutoClaim').checked },
+  }, extra || {});
+}
+
+async function saveNotify(extra) {
+  return api('notify', { method: 'POST', body: JSON.stringify(notifyPayload(extra)) });
+}
+
+// bindClick 而不是直接给元素赋 onclick：配置页的 node 回归用例只桩了部分元素，
+// 直接取属性会在「元素不存在」时抛错，把整段脚本的加载搞挂。
+function bindClick(id, fn) { const el = $(id); if (el) el.onclick = fn; }
+
+bindClick('btnNtSave', async () => {
+  const b = $('btnNtSave');
+  b.disabled = true; b.textContent = '保存中…';
+  try {
+    await saveNotify();
+    toast('通知配置已保存并立即生效', 'ok');
+    await loadNotify();
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '保存通知配置'; }
+});
+
+// 清除：只清通道本身（url + 密钥），事件开关保持不变。
+bindClick('btnNtDingClear', async () => {
+  try { await saveNotify({ clear_dingtalk: true }); toast('已清除钉钉通道', 'ok'); await loadNotify(); }
+  catch (e) { toast('清除失败：' + e.message, 'err'); }
+});
+bindClick('btnNtWecomClear', async () => {
+  try { await saveNotify({ clear_wecom: true }); toast('已清除企业微信通道', 'ok'); await loadNotify(); }
+  catch (e) { toast('清除失败：' + e.message, 'err'); }
+});
+
+bindClick('btnNtTest', async () => {
+  const b = $('btnNtTest');
+  b.disabled = true; b.textContent = '发送中…';
+  try {
+    const r = await api('notify/test', { method: 'POST' });
+    toast('测试消息已发送：' + ((r.sent || []).join('、') || '无通道'), 'ok');
+  } catch (e) { toast('发送失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '发送测试消息'; }
+});
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
 function openAdd() {

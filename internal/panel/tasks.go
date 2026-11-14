@@ -73,6 +73,8 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	response["tasks"] = tasks
+	// 新任务提醒（实现见 tasknotify.go；未配置 webhook 时是一次空调用）。
+	p.noteTaskList(a, tasks)
 	writeJSON(w, http.StatusOK, response)
 }
 
