@@ -2039,6 +2039,22 @@ function taskRowPresentation(t, caps) {
   return { code, progress, reward, state, action };
 }
 
+// taskEndText 任务活动截止时间（表格「结束时间」列）的展示文本。
+// 上游 valid_end 有三种形态：空格分隔本地时间、RFC3339、epoch 秒/毫秒（见
+// upstream/tasks.go parseTaskTime）。这里统一截到分钟；解析不出来就原样显示，
+// 便于发现上游字段形态变化，而不是静默显示成空。
+function taskEndText(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return '—';
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (m) return m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5];
+  const n = /^\d{10,13}$/.test(s) ? Number(s) : NaN;
+  const d = isNaN(n) ? new Date(s) : new Date(s.length >= 13 ? n : n * 1000);
+  if (isNaN(d.getTime())) return s;
+  const p = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
 // 可自动完成的任务（与后端 autoActions 表一致）：判据为行为事件、可经网关复现。
 // 其余任务需在官方客户端内交互，面板只展示指引（行 title 提示）。
 // 注意：键含点号（Model_chat_GLM5.2）必须加引号，否则会被解析成属性访问 + 数字字面量。
@@ -2163,8 +2179,10 @@ function taskJobPresentation(job) {
   const progress = '处理 ' + (job.completed || 0) + ' / ' + (job.total || 0) + ' 项';
   const summary = taskResultSummary(job.results || []);
   const current = active && job.current_task ? '正在处理：' + job.current_task : '';
+  // 结束时刻：只有跑完的作业才有 finished_at（pending/running 为 null）。
+  const finished = job.finished_at ? '结束于 ' + taskEndText(job.finished_at) : '';
   return { active, trigger, progress, label: labels[job.status] || job.status,
-    message: [labels[job.status] || job.status, progress, current, job.error || job.message, summary.message].filter(Boolean).join(' · '),
+    message: [labels[job.status] || job.status, progress, current, finished, job.error || job.message, summary.message].filter(Boolean).join(' · '),
     severity: job.status === 'error' || job.status === 'interrupted' ? 'err' : summary.severity };
 }
 
@@ -2287,11 +2305,13 @@ async function loadTasks() {
       const badge = '<span class="tag ' + (t.claimed ? 'ok' : t.claimable ? 'warn' : 'mute') + '">' + esc(row.state) + '</span>';
       const acted = row.action ? '<button class="xs' + (row.action === 'accept' ? '' : ' primary') + '" data-t="' + row.action + '" data-c="' + esc(row.code) + '"' + (row.action === 'auto' && AUTO_TASKS[row.code] ? ' title="' + esc(AUTO_TASKS[row.code]) + '"' : '') + '>' + ({ claim: '领取', auto: '一键完成', accept: '接受' }[row.action]) + '</button>' : '';
       // 操作指引（description/task_desc）挂 title 提示：如何完成交给用户看
-      const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
+      const end = taskEndText(t.valid_end);
+      const tip = [t.title, t.task_desc || t.description, t.valid_end ? '截止：' + end : '', t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
       return '<tr title="' + esc(tip) + '"><td class="mark" aria-hidden="true"><i></i></td>' +
         '<td class="who"><div class="nm">' + esc(t.title || row.code) + '</div><div class="id">' + esc(row.code) + (t.tag ? ' · ' + esc(t.tag) : '') + '</div></td>' +
         '<td class="num">' + esc(row.progress) + '</td>' +
         '<td class="num">' + esc(row.reward) + '</td>' +
+        '<td class="num">' + esc(end) + '</td>' +
         '<td>' + badge + '</td>' +
         '<td class="acts">' + acted + '</td></tr>';
     }).join('');
