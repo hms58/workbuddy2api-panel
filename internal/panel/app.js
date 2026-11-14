@@ -1749,6 +1749,11 @@ async function loadNotify() {
     $('ntWecomUrl').disabled = !!managed.wecom;
     $('btnNtDingClear').disabled = !!managed.dingtalk;
     $('btnNtWecomClear').disabled = !!managed.wecom;
+    // 开关：未配置过的渠道默认勾上（填完 URL 直接保存即可用）；环境变量托管时只读。
+    $('ntDingOn').checked = ding.configured ? !!ding.enabled : true;
+    $('ntWecomOn').checked = wecom.configured ? !!wecom.enabled : true;
+    $('ntDingOn').disabled = !!managed.dingtalk;
+    $('ntWecomOn').disabled = !!managed.wecom;
     if (ding.configured) $('ntDingUrl').placeholder = ding.url;
     $('ntDingHint').textContent = ding.configured
       ? (managed.dingtalk ? '由环境变量托管：' : '当前：') + ding.url : '未配置';
@@ -1766,8 +1771,8 @@ async function loadNotify() {
 
 function notifyPayload(extra) {
   return Object.assign({
-    dingtalk: { url: $('ntDingUrl').value.trim(), secret: $('ntDingSecret').value.trim() },
-    wecom: { url: $('ntWecomUrl').value.trim() },
+    dingtalk: { enabled: $('ntDingOn').checked, url: $('ntDingUrl').value.trim(), secret: $('ntDingSecret').value.trim() },
+    wecom: { enabled: $('ntWecomOn').checked, url: $('ntWecomUrl').value.trim() },
     events: { new_task: $('ntNewTask').checked, auto_claim: $('ntAutoClaim').checked },
   }, extra || {});
 }

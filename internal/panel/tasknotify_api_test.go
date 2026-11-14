@@ -205,6 +205,41 @@ func waitHooks(t *testing.T, rec *hookRecorder, want int) {
 	t.Fatalf("webhook 收到 %d 条，期望 %d", rec.count(), want)
 }
 
+// 每渠道开关：关掉后即使 URL 还在也不推送（URL/密钥保留，重新打开即恢复）。
+func TestNotifyChannelSwitch(t *testing.T) {
+	dir := t.TempDir()
+	p := newNotifyPanel(t, dir)
+	body := `{"dingtalk":{"enabled":false,"url":"https://oapi.dingtalk.com/robot/send?access_token=t1","secret":"SECx"}}`
+	if rec := notifyCall(t, p, "POST", "/panel/api/notify", body); rec.Code != 200 {
+		t.Fatalf("save = %d %s", rec.Code, rec.Body.String())
+	}
+	v := decodeNotifyView(t, notifyCall(t, p, "GET", "/panel/api/notify", ""))
+	if v.DingTalk.Enabled {
+		t.Fatal("enabled=false 未生效")
+	}
+	if !v.DingTalk.Configured || v.Enabled {
+		t.Fatalf("关掉后应保留配置但不启用: %+v", v)
+	}
+	if p.taskNotify().enabled() {
+		t.Fatal("关掉的渠道仍被当作可用目标")
+	}
+	if rec := notifyCall(t, p, "POST", "/panel/api/notify/test", ""); rec.Code != 400 {
+		t.Fatalf("关掉后测试发送应 400，得到 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 重新打开：URL/密钥仍在，直接可用
+	if rec := notifyCall(t, p, "POST", "/panel/api/notify", `{"dingtalk":{"enabled":true}}`); rec.Code != 200 {
+		t.Fatalf("re-enable = %d %s", rec.Code, rec.Body.String())
+	}
+	v = decodeNotifyView(t, notifyCall(t, p, "GET", "/panel/api/notify", ""))
+	if !v.DingTalk.Enabled || !v.DingTalk.SecretSet || !v.Enabled {
+		t.Fatalf("重新打开后配置丢失: %+v", v)
+	}
+	if !p.taskNotify().enabled() {
+		t.Fatal("重新打开后仍无可用目标")
+	}
+}
+
 // 三个通知接口都必须过鉴权层（未带 key 一律 401）。
 func TestNotifyEndpointsRequireAuth(t *testing.T) {
 	p := New(Config{APIKey: "test-key"})

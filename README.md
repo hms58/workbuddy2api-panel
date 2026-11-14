@@ -523,15 +523,16 @@ curl -s http://localhost:7863/v1/messages \
 
 ```json
 {
-  "dingtalk": { "url": "https://oapi.dingtalk.com/robot/send?access_token=...", "secret": "SEC..." },
-  "wecom":    { "url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." },
+  "dingtalk": { "enabled": true, "url": "https://oapi.dingtalk.com/robot/send?access_token=...", "secret": "SEC..." },
+  "wecom":    { "enabled": false, "url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." },
   "events":   { "new_task": true, "auto_claim": true }
 }
 ```
 
+- 每个渠道有独立**开关**（`enabled`，缺省视为开启）：关掉后即使 URL 还在也不推送，URL 与密钥保留，重新打开即恢复；配置了多个渠道时，每个渠道各收到一条。
 - 钉钉 `secret` 对应机器人「加签」；用关键词模式时留空即可（URL 原样发出）。
-- 环境变量：`WB2A_NOTIFY_DINGTALK_URL` / `WB2A_NOTIFY_DINGTALK_SECRET` / `WB2A_NOTIFY_WECOM_URL`（优先于文件）。
-- 「新任务」按账号记住已见 `task_code`（`data/task-seen.json`），**首次见到某账号只记录不提醒**；配置改动下次启动生效。
+- 环境变量：`WB2A_NOTIFY_DINGTALK_URL` / `WB2A_NOTIFY_DINGTALK_SECRET` / `WB2A_NOTIFY_WECOM_URL`（优先于文件，且视同启用）。
+- 「新任务」按账号记住已见 `task_code`（`data/task-seen.json`），**首次见到某账号只记录不提醒**；面板保存即时生效，手工改文件则下次启动生效。
 
 ## 核心行为语义
 

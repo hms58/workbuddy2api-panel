@@ -1662,17 +1662,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <header><h3>任务通知</h3><span class="grow"></span><span class="note" id="ntPath"></span></header>
         <div class="pad">
           <div class="grid2">
-            <label class="fld"><span class="lb">钉钉机器人 Webhook</span>
+            <div class="fld"><span class="lb">钉钉机器人 Webhook</span>
+              <div class="switch"><span class="lb">启用该渠道</span><input type="checkbox" id="ntDingOn"></div>
               <div class="inline"><input id="ntDingUrl" placeholder="https://oapi.dingtalk.com/robot/send?access_token=…">
                 <button type="button" class="xs" id="btnNtDingClear">清除</button></div>
-              <span class="hint" id="ntDingHint">未配置</span></label>
+              <span class="hint" id="ntDingHint">未配置</span></div>
             <label class="fld"><span class="lb">钉钉加签密钥</span>
               <input id="ntDingSecret" type="password" placeholder="SEC…（关键词模式留空）">
               <span class="hint" id="ntDingSecretHint">未配置</span></label>
-            <label class="fld"><span class="lb">企业微信机器人 Webhook</span>
+            <div class="fld"><span class="lb">企业微信机器人 Webhook</span>
+              <div class="switch"><span class="lb">启用该渠道</span><input type="checkbox" id="ntWecomOn"></div>
               <div class="inline"><input id="ntWecomUrl" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…">
                 <button type="button" class="xs" id="btnNtWecomClear">清除</button></div>
-              <span class="hint" id="ntWecomHint">未配置</span></label>
+              <span class="hint" id="ntWecomHint">未配置</span></div>
             <div class="fld"><span class="lb">提醒事件</span>
               <div class="switch"><span class="lb">任务活动有新任务</span><input type="checkbox" id="ntNewTask"></div>
               <div class="switch"><span class="lb">自动领取积分</span><input type="checkbox" id="ntAutoClaim"></div>

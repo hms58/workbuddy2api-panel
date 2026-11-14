@@ -16,6 +16,7 @@ import (
 
 // notifyChannelView 单个通道的对外视图（URL 打码，密钥只报「已配置」）。
 type notifyChannelView struct {
+	Enabled    bool   `json:"enabled"` // 开关：关掉后即使填了 URL 也不推送
 	Configured bool   `json:"configured"`
 	URL        string `json:"url"`
 	SecretSet  bool   `json:"secret_set"`
@@ -43,11 +44,13 @@ type notifyView struct {
 // url / secret 留空 = 不修改（沿用配置页「留空即不改」口径）；要清空用 clear_*。
 type notifySaveRequest struct {
 	DingTalk struct {
-		URL    string `json:"url"`
-		Secret string `json:"secret"`
+		Enabled *bool  `json:"enabled"`
+		URL     string `json:"url"`
+		Secret  string `json:"secret"`
 	} `json:"dingtalk"`
 	WeCom struct {
-		URL string `json:"url"`
+		Enabled *bool  `json:"enabled"`
+		URL     string `json:"url"`
 	} `json:"wecom"`
 	Events struct {
 		NewTask   *bool `json:"new_task"`
@@ -119,24 +122,24 @@ func (n *taskNotify) view() notifyView {
 		v.Events.AutoClaim = *f.Events.AutoClaim
 	}
 	dingURL, dingSecret, wecomURL := strings.TrimSpace(f.DingTalk.URL), strings.TrimSpace(f.DingTalk.Secret), strings.TrimSpace(f.WeCom.URL)
-	v.DingTalk = notifyChannelView{Configured: dingURL != "", URL: maskWebhook(dingURL), SecretSet: dingSecret != "", Source: "file"}
-	v.WeCom = notifyChannelView{Configured: wecomURL != "", URL: maskWebhook(wecomURL), Source: "file"}
+	v.DingTalk = notifyChannelView{Enabled: f.DingTalk.active(), Configured: dingURL != "", URL: maskWebhook(dingURL), SecretSet: dingSecret != "", Source: "file"}
+	v.WeCom = notifyChannelView{Enabled: f.WeCom.active(), Configured: wecomURL != "", URL: maskWebhook(wecomURL), Source: "file"}
 	if dingURL == "" && dingSecret == "" {
 		v.DingTalk.Source = ""
 	}
 	if wecomURL == "" {
 		v.WeCom.Source = ""
 	}
-	// 环境变量优先：托管时前端置灰（改了也不会生效）。
+	// 环境变量优先：托管时前端置灰（改了也不会生效），且视同启用。
 	if env := strings.TrimSpace(envDingTalkURL()); env != "" {
-		v.DingTalk = notifyChannelView{Configured: true, URL: maskWebhook(env), SecretSet: envDingTalkSecret() != "", Source: "env"}
+		v.DingTalk = notifyChannelView{Enabled: true, Configured: true, URL: maskWebhook(env), SecretSet: envDingTalkSecret() != "", Source: "env"}
 		v.EnvManaged.DingTalk = true
 	}
 	if env := strings.TrimSpace(envWeComURL()); env != "" {
-		v.WeCom = notifyChannelView{Configured: true, URL: maskWebhook(env), Source: "env"}
+		v.WeCom = notifyChannelView{Enabled: true, Configured: true, URL: maskWebhook(env), Source: "env"}
 		v.EnvManaged.WeCom = true
 	}
-	v.Enabled = v.DingTalk.Configured || v.WeCom.Configured
+	v.Enabled = (v.DingTalk.Configured && v.DingTalk.Enabled) || (v.WeCom.Configured && v.WeCom.Enabled)
 	return v
 }
 
@@ -162,6 +165,10 @@ func (n *taskNotify) apply(req notifySaveRequest) error {
 	if req.ClearDingTalk {
 		f.DingTalk = notifyEndpoint{}
 	} else {
+		if req.DingTalk.Enabled != nil {
+			v := *req.DingTalk.Enabled
+			f.DingTalk.Enabled = &v
+		}
 		if dingURL != "" {
 			f.DingTalk.URL = dingURL
 		}
@@ -171,8 +178,14 @@ func (n *taskNotify) apply(req notifySaveRequest) error {
 	}
 	if req.ClearWeCom {
 		f.WeCom = notifyEndpoint{}
-	} else if wecomURL != "" {
-		f.WeCom.URL = wecomURL
+	} else {
+		if req.WeCom.Enabled != nil {
+			v := *req.WeCom.Enabled
+			f.WeCom.Enabled = &v
+		}
+		if wecomURL != "" {
+			f.WeCom.URL = wecomURL
+		}
 	}
 	if req.Events.NewTask != nil {
 		v := *req.Events.NewTask

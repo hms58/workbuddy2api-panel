@@ -77,10 +77,16 @@ type notifyTarget struct {
 }
 
 // notifyEndpoint notify.json 里的一段 webhook 配置。
+// Enabled 是每渠道的开关：缺字段（老配置）= 启用，升级后行为不变；
+// 关掉时 URL/密钥仍然保留，重新打开不用重填。
 type notifyEndpoint struct {
-	URL    string `json:"url"`
-	Secret string `json:"secret"`
+	Enabled *bool  `json:"enabled,omitempty"`
+	URL     string `json:"url"`
+	Secret  string `json:"secret"`
 }
+
+// active 该渠道是否启用（缺字段视为启用）。
+func (e notifyEndpoint) active() bool { return e.Enabled == nil || *e.Enabled }
 
 // notifyFile notify.json 的结构。
 type notifyFile struct {
@@ -196,19 +202,21 @@ func (n *taskNotify) reloadLocked() {
 	dingURL := strings.TrimSpace(f.DingTalk.URL)
 	dingSecret := strings.TrimSpace(f.DingTalk.Secret)
 	wecomURL := strings.TrimSpace(f.WeCom.URL)
+	// 每渠道开关：文件里 enabled=false 就整条跳过（URL 留着，重新打开即恢复）。
+	dingOn, wecomOn := f.DingTalk.active(), f.WeCom.active()
 	if v := envDingTalkURL(); v != "" {
-		dingURL = v
+		dingURL, dingOn = v, true // 环境变量是部署方的显式意图，视同启用
 	}
 	if v := envDingTalkSecret(); v != "" {
 		dingSecret = v
 	}
 	if v := envWeComURL(); v != "" {
-		wecomURL = v
+		wecomURL, wecomOn = v, true
 	}
-	if dingURL != "" {
+	if dingURL != "" && dingOn {
 		n.targets = append(n.targets, notifyTarget{kind: "dingtalk", url: dingURL, secret: dingSecret})
 	}
-	if wecomURL != "" {
+	if wecomURL != "" && wecomOn {
 		n.targets = append(n.targets, notifyTarget{kind: "wecom", url: wecomURL})
 	}
 	if f.Events.NewTask != nil {
