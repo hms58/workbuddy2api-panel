@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,6 +113,15 @@ func TestNotifySaveSemantics(t *testing.T) {
 	v = decodeNotifyView(t, notifyCall(t, p, "GET", "/panel/api/notify", ""))
 	if v.DingTalk.Configured || v.DingTalk.SecretSet || v.Enabled {
 		t.Fatalf("清除后仍有残留: %+v", v)
+	}
+
+	// 开关独立于 URL：URL 都没有时也要能单独关掉（存 enabled=false 即生效）。
+	if rec := notifyCall(t, p, "POST", "/panel/api/notify", `{"dingtalk":{"enabled":false}}`); rec.Code != 200 {
+		t.Fatalf("disable-only = %d %s", rec.Code, rec.Body.String())
+	}
+	v = decodeNotifyView(t, notifyCall(t, p, "GET", "/panel/api/notify", ""))
+	if v.DingTalk.Enabled || v.DingTalk.Configured || v.Enabled {
+		t.Fatalf("空 URL 时关不掉开关: %+v", v)
 	}
 }
 
@@ -237,6 +247,50 @@ func TestNotifyChannelSwitch(t *testing.T) {
 	}
 	if !p.taskNotify().enabled() {
 		t.Fatal("重新打开后仍无可用目标")
+	}
+}
+
+// 前端开关必须独立于 URL：URL 为空但存过 enabled=false 时，回填也必须保持未勾选
+// （否则用户永远关不掉一个还没填 URL 的渠道——2026-11-14 实测反馈）。
+func TestAppJSNotifySwitchIndependentOfURL(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; notify switch test skipped")
+	}
+	script := `const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('async function loadNotify'), end = src.indexOf('function notifyPayload');
+if (start < 0 || end < 0) throw new Error('loadNotify not found');
+const ids = ['ntPath','ntDingUrl','ntDingSecret','ntWecomUrl','btnNtDingClear','btnNtWecomClear',
+  'ntDingOn','ntWecomOn','ntDingHint','ntDingSecretHint','ntWecomHint','ntNewTask','ntAutoClaim','ntNote'];
+const hosts = {};
+for (const id of ids) hosts[id] = { value: '', checked: true, disabled: false, textContent: '', placeholder: '' };
+const ch = enabled => ({ enabled, configured: false, url: '', secret_set: false, source: '' });
+const view = { path: '/x/notify.json', enabled: false, dingtalk: ch(false), wecom: ch(true),
+  events: { new_task: true, auto_claim: true }, env_managed: { dingtalk: false, wecom: false } };
+const ctx = { $: id => hosts[id], api: async () => view, String, Object };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end), ctx);
+ctx.loadNotify().then(() => {
+  assert.strictEqual(hosts.ntDingOn.checked, false, 'URL 为空时也必须保持关闭');
+  assert.strictEqual(hosts.ntWecomOn.checked, true, 'enabled=true 必须保持勾选');
+  assert(hosts.ntDingHint.textContent.indexOf('已关闭') >= 0, '提示需说明已关闭: ' + hosts.ntDingHint.textContent);
+  process.stdout.write('ok');
+}).catch(e => { console.error(e); process.exit(1); });`
+	f, err := os.CreateTemp(t.TempDir(), "notify-switch-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("notify switch node test failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		t.Fatalf("out = %s", out)
 	}
 }
 

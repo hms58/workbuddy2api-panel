@@ -1749,18 +1749,21 @@ async function loadNotify() {
     $('ntWecomUrl').disabled = !!managed.wecom;
     $('btnNtDingClear').disabled = !!managed.dingtalk;
     $('btnNtWecomClear').disabled = !!managed.wecom;
-    // 开关：未配置过的渠道默认勾上（填完 URL 直接保存即可用）；环境变量托管时只读。
-    $('ntDingOn').checked = ding.configured ? !!ding.enabled : true;
-    $('ntWecomOn').checked = wecom.configured ? !!wecom.enabled : true;
+    // 开关独立于 URL：只要存过 enabled=false 就保持关闭（URL 为空时也一样）；
+    // 后端没给该字段（老配置）视为开启。
+    $('ntDingOn').checked = ding.enabled !== false;
+    $('ntWecomOn').checked = wecom.enabled !== false;
     $('ntDingOn').disabled = !!managed.dingtalk;
     $('ntWecomOn').disabled = !!managed.wecom;
     if (ding.configured) $('ntDingUrl').placeholder = ding.url;
     $('ntDingHint').textContent = ding.configured
-      ? (managed.dingtalk ? '由环境变量托管：' : '当前：') + ding.url : '未配置';
+      ? (managed.dingtalk ? '由环境变量托管：' : (ding.enabled === false ? '已关闭，不推送：' : '当前：')) + ding.url
+      : (ding.enabled === false ? '未配置（已关闭）' : '未配置');
     $('ntDingSecretHint').textContent = ding.secret_set ? '已配置（留空不修改）' : '未配置';
     if (wecom.configured) $('ntWecomUrl').placeholder = wecom.url;
     $('ntWecomHint').textContent = wecom.configured
-      ? (managed.wecom ? '由环境变量托管：' : '当前：') + wecom.url : '未配置';
+      ? (managed.wecom ? '由环境变量托管：' : (wecom.enabled === false ? '已关闭，不推送：' : '当前：')) + wecom.url
+      : (wecom.enabled === false ? '未配置（已关闭）' : '未配置');
     $('ntNewTask').checked = !!(d.events || {}).new_task;
     $('ntAutoClaim').checked = !!(d.events || {}).auto_claim;
     $('ntNote').textContent = d.enabled ? '' : '尚未配置任何通道，不会推送';
