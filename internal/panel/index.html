@@ -182,9 +182,11 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }
-label.fld { display: block; margin-bottom: 14px; }
-label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
-label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
+/* div.fld 与 label.fld 同款布局：一个字段里含多个 input（如「启用」勾选框 + 输入框）时
+   不能包在 <label> 里，否则点提示文字会误触勾选框。 */
+label.fld, div.fld { display: block; margin-bottom: 14px; }
+label.fld > .lb, div.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
+label.fld > .hint, div.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
 .inline { display: flex; align-items: center; gap: 9px; }
 
 /* ── 统计条（观测区）──────────────────────────────────────────────── */
