@@ -45,7 +45,14 @@ func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 type chatStat struct {
 	start time.Time
 	model string
-	mode  string // "stream" | "sync"
+	// groupID 非空 = 本次是模型组请求（model 此时为 "group:<id>"）。
+	// usedModel 是该请求**最终实际打到上游**的成员名（"cn:xxx" / "global:xxx"）。
+	// 二者一起组成运行日志的展示串 "group:<id>/cn:xxx"：
+	// 只有组名看不出到底用了哪个模型，只有成员名又不知道客户端点的是哪个组。
+	// 组内降级（chain.advance）会改写 usedModel，所以它必须随推进同步更新。
+	groupID   string
+	usedModel string
+	mode      string // "stream" | "sync"
 	uid   string // 完整 uid，展示时只取前 8 位
 	nick  string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
 	ttfb  time.Duration
@@ -529,6 +536,11 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		s := t.stat
 		e.Account = logfmt.Label(s.uid, s.nick)
 		e.Model = s.model
+		// 组请求：额外给一个「组名/实际成员」的展示串。
+		// Model 保持 group:<id> 不动 —— 它是筛选与账本的键。
+		if s.groupID != "" && s.usedModel != "" && s.usedModel != s.model {
+			e.GroupModel = s.model + "/" + s.usedModel
+		}
 		e.Outcome = s.outcome
 		e.TTFBMs = s.ttfb.Milliseconds()
 		e.Attempts = s.attempts

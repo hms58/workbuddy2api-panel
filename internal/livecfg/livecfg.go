@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/modelgroup"
 )
 
 // Snapshot 一次读取的不可变配置视图。
@@ -32,6 +34,15 @@ type Snapshot struct {
 	// 的等价模型（裸名 → 裸名）。nil = 不降级。与 aliases 的区别：aliases 是
 	// 「客户端名→真实名」的静态映射，本表是「限流时的临时改道」，且不写持久状态。
 	ModelFallback map[string]string
+	// ModelGroupSet 模型组集合（已编译：成员已排序、realm/bare 与 window 已解析，
+	// 内含 lastOK 运行态）。nil = 无组，`group:` 请求返回 400，其余流量零影响。
+	//
+	// 为什么直接放 *GroupSet 而不是 []Group：lastOK（上次可用成员）存在 GroupSet 里，
+	// 快照整体替换时对象一起替换，天然复用同一实例 —— 若放切片、由读方每次
+	// NewGroupSet(...)，「上次可用成员优先」会永远失效。
+	ModelGroupSet *modelgroup.GroupSet
+	// ModelGroupOpts 模型组全局参数（已补齐缺省）。
+	ModelGroupOpts modelgroup.Options
 }
 
 // NormalizeModelAliases 把用户配置的 aliases 条目（"客户端名=真实模型名"）归一化为查找表。

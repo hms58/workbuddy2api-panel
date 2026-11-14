@@ -423,6 +423,9 @@ func (s *Scheduler) missedToday(now time.Time) []taskKind {
 		if sl.at.IsZero() {
 			continue // 未配小时数：本来就不跑
 		}
+		if sl.kind == taskGrowth {
+			continue // 成长任务只按定时时点跑：启动补跑等于「重启就自动做完并领奖」
+		}
 		if sl.at.Year() != now.Year() || sl.at.YearDay() != now.YearDay() {
 			if s.ranToday(sl.kind, now) {
 				continue // 今天已补跑过一轮：重启不该再把同样的请求打一遍

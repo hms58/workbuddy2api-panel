@@ -304,6 +304,61 @@ func TestNewChatStatModelFallback(t *testing.T) {
 	}
 }
 
+// TestChatStatGroupModelDisplay 组请求的运行日志必须显示「组名/实际成员」。
+//
+// 用户实测反馈：日志里只有 group:auto-flash，看不出到底用了哪个模型。
+// Model 字段保持 group:<id>（它是筛选与账本的键），另给 GroupModel 供展示。
+// 组内降级会改写 usedModel，所以两种状态都要覆盖。
+func TestChatStatGroupModelDisplay(t *testing.T) {
+	// ① 非组请求：GroupModel 必须为空（前端回落显示 Model）
+	// ev 构造一个「带 stat 的 trace」，走真实 event() 路径。
+	ev := func(st *chatStat) reqlog.Event {
+		tr := &requestTrace{id: "r", start: time.Now(), stat: st, path: "/v1/chat/completions"}
+		return tr.event(200)
+	}
+
+	// ① 非组请求：GroupModel 必须为空（前端回落显示 Model）
+	st := newChatStat(time.Now(), "cn:glm-5.3", false, nil)
+	st.uid, st.nick = "u1", "n"
+	e := ev(st)
+	if e.GroupModel != "" {
+		t.Errorf("非组请求 GroupModel 应为空，实际 %q", e.GroupModel)
+	}
+	if e.Model != "cn:glm-5.3" {
+		t.Errorf("Model = %q", e.Model)
+	}
+
+	// ② 组请求，首个成员即成功：group:g/cn:m1
+	st = newChatStat(time.Now(), "group:g", false, nil)
+	st.groupID = "g"
+	st.usedModel = "cn:m1"
+	st.uid, st.nick = "u1", "n"
+	e = ev(st)
+	if want := "group:g/cn:m1"; e.GroupModel != want {
+		t.Errorf("GroupModel = %q, want %q", e.GroupModel, want)
+	}
+	// Model 必须仍是组名：改成组合串会让「按 group:g 筛请求」失效
+	if e.Model != "group:g" {
+		t.Errorf("Model = %q, want group:g（筛选键不得被展示串污染）", e.Model)
+	}
+
+	// ③ 组内降级到第二个成员：展示串要跟着换，不能停留在首个成员
+	st.usedModel = "global:m2"
+	e = ev(st)
+	if want := "group:g/global:m2"; e.GroupModel != want {
+		t.Errorf("降级后 GroupModel = %q, want %q", e.GroupModel, want)
+	}
+
+	// ④ usedModel 与 model 相同（组名没换成员就失败）→ 不给组合串，避免 "group:g/group:g"
+	st = newChatStat(time.Now(), "group:g", false, nil)
+	st.groupID = "g"
+	st.usedModel = "group:g"
+	e = ev(st)
+	if e.GroupModel != "" {
+		t.Errorf("usedModel == model 时不该产生组合串，实际 %q", e.GroupModel)
+	}
+}
+
 func TestCompletionTokensExtraction(t *testing.T) {
 	got := completionTokens(map[string]any{
 		"usage": map[string]any{"prompt_tokens": 10.0, "completion_tokens": 234.0, "total_tokens": 244.0},

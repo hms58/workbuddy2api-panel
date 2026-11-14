@@ -20,8 +20,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
 )
 
 // growth 域任务路径（与 scripts/task_common.py 对齐）。
@@ -58,6 +62,10 @@ type Task struct {
 	Status         string `json:"status,omitempty"`    // 上游任务状态（complete 等）
 	Claimable      bool   `json:"claimable,omitempty"` // 进度达标且未领取（本地推算）
 	Claimed        bool   `json:"claimed,omitempty"`   // 已领取（accept_status == claimed）
+	// ValidStart / ValidEnd 上游下发的活动起止时间（原样保留，解析失败不影响任务本身）。
+	// 形态容三种：空格分隔本地时间、RFC3339、epoch 秒/毫秒。
+	ValidStart     string `json:"valid_start,omitempty"`
+	ValidEnd       string `json:"valid_end,omitempty"`
 	creditKnown    bool   `json:"-"`
 	energyKnown    bool   `json:"-"`
 	hasRewardKnown bool   `json:"-"`
@@ -185,6 +193,40 @@ func parseClaimReward(data json.RawMessage) (credit, energy int64, err error) {
 	return resp.Credit, resp.Energy, nil
 }
 
+// taskTimeLayouts 上游任务活动时间的已知文本形态。
+var taskTimeLayouts = []string{"2006-01-02 15:04:05", time.RFC3339}
+
+// parseTaskTime 解析上游任务时间串。取不到（空/非法）返回 false —— 调用方据此
+// 放弃自动决策而不是猜一个时间：猜错的代价是误领或漏领积分。
+func parseTaskTime(raw string) (time.Time, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range taskTimeLayouts {
+		if t, err := time.ParseInLocation(layout, s, cst.Loc); err == nil {
+			return t, true
+		}
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n >= 1e12 { // 13 位以上按毫秒（秒制最大合理值远小于 1e12）
+			return time.UnixMilli(n).In(cst.Loc), true
+		}
+		if n > 0 {
+			return time.Unix(n, 0).In(cst.Loc), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// ValidEndTime 活动截止时刻；上游未下发或格式非法时返回 false。
+func (t *Task) ValidEndTime() (time.Time, bool) {
+	if t == nil {
+		return time.Time{}, false
+	}
+	return parseTaskTime(t.ValidEnd)
+}
+
 // parseGrowthTasks 解析 growth 任务列表 data.tasks[]（默认与 mp 口径共用）。
 func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 	var resp struct {
@@ -208,6 +250,8 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 			Target       int64           `json:"target"`
 			Current      int64           `json:"current"`
 			Progress     json.RawMessage `json:"progress"`
+			ValidStart   string          `json:"valid_start"`
+			ValidEnd     string          `json:"valid_end"`
 		} `json:"tasks"`
 	}
 	// 另按原始 JSON 再解一遍：字段「存在」与「显式 0」必须能区分（移植上游 PR #104）。
@@ -272,6 +316,8 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 			Status:         t.Status,
 			Claimable:      !claimed && tgt > 0 && cur >= tgt,
 			Claimed:        claimed,
+			ValidStart:     t.ValidStart,
+			ValidEnd:       t.ValidEnd,
 			creditKnown:    creditKnown,
 			energyKnown:    energyKnown,
 			hasRewardKnown: hasRewardKnown,

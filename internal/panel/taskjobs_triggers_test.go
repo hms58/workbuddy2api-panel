@@ -29,9 +29,8 @@ func TestTaskJobsAutomaticTriggersRespectSwitchAndRealm(t *testing.T) {
 	}
 	enabled.Store(true)
 	p.StartNewAccountTasks("cn-new")
-	newJob, found := p.GetTaskJob("cn-new")
-	if !found || newJob.Trigger != "new_account" {
-		t.Fatalf("new-account trigger missing: %+v", newJob)
+	if job, found := p.GetTaskJob("cn-new"); found {
+		t.Fatalf("新账号不再立即排队（等定时时点），实际建了作业: %+v", job)
 	}
 	p.StartNewAccountTasks("global-new")
 	p.RunGrowthQueueNow()
@@ -39,11 +38,13 @@ func TestTaskJobsAutomaticTriggersRespectSwitchAndRealm(t *testing.T) {
 	if !found || dailyJob.Trigger != "daily" {
 		t.Fatalf("daily trigger missing: %+v", dailyJob)
 	}
-	if jobs := p.ListTaskJobs(); len(jobs) != 2 {
-		t.Fatalf("disabled/global accounts must be excluded: %+v", jobs)
+	// cn-new 不再由「新账号」触发，而是由定时轮次排上（trigger 必须是 daily）。
+	newJob, found := p.GetTaskJob("cn-new")
+	if !found || newJob.Trigger != "daily" {
+		t.Fatalf("cn-new 应由定时轮次触发（trigger=daily），实际: %+v", newJob)
 	}
-	if reused, _ := p.GetTaskJob("cn-new"); reused.ID != newJob.ID {
-		t.Fatal("daily trigger replaced a running new-account job")
+	if jobs := p.ListTaskJobs(); len(jobs) != 2 {
+		t.Fatalf("应有 cn-daily 与 cn-new 两个定时作业（禁用/国际区排除）: %+v", jobs)
 	}
 
 	enabled.Store(false)

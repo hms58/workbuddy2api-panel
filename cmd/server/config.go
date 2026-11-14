@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/modelgroup"
 	"github.com/misakano7545/workbuddy2api-panel/internal/prompt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/safefile"
 )
@@ -129,6 +130,10 @@ type Config struct {
 		// GrowthConcurrency 排程轮次的账号间并发（缺省 1，上限 4）：与面板手动
 		// 「执行队列」同一个并发语义；调高更快的代价是上游风控暴露面。
 		GrowthConcurrency int `json:"growth_concurrency"`
+		// GrowthClaimMode 成长任务领奖模式：manual（缺省）= 定时轮次只完成动作，
+		// 积分留到面板人工领取；auto = 旧行为（达标即领）。活动任务剩余不足 24 小时时
+		// 两种模式都自动领（避免过期）。非法值启动 fail fast，空值回落 manual。
+		GrowthClaimMode string `json:"growth_claim_mode"`
 		// JitterMinutes 0 = 精确整点。正值把触发时刻摊在该窗口内，同一小时偏移固定。
 		JitterMinutes int `json:"jitter_minutes"`
 		// AccountSpreadMinutes 账号级摊开窗口（issue #45）：0 = 关闭（同一秒打全池）。
@@ -340,6 +345,12 @@ type Config struct {
 		// 只对 6004 生效；11102/11101/普通 429/5xx 都不降级。
 		// 缺省 nil = 不降级（对老配置零影响）。
 		ModelFallback map[string]string `json:"model_fallback"`
+		// ModelGroups 模型组定义（`group:<id>` 路由）。
+		// 空数组/键缺席 = 无组，行为与现状完全一致（零回归）。
+		// 成员 enabled 缺省 true；window 为 "HH:MM-HH:MM"，支持跨天（23:00-07:00）。
+		ModelGroups []modelgroup.GroupConfig `json:"model_groups"`
+		// ModelGroup 模型组的全局参数。
+		ModelGroup ModelGroupOptions `json:"model_group"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -401,6 +412,18 @@ type Config struct {
 	ServerReadTimeoutDur time.Duration `json:"-"`
 	// ShutdownTimeoutDur 解析后的优雅关停窗口；0 = 不等待在途请求直接退。
 	ShutdownTimeoutDur time.Duration `json:"-"`
+	// ModelGroupOpts 解析后的模型组参数（供 livecfg 快照与面板复用）。
+	ModelGroupOpts modelgroup.Options `json:"-"`
+}
+
+// ModelGroupOptions `pool.model_group` 段。指针用于区分「未配置」与「显式 false」：
+// 未配置 → 默认 true（装好就生效，与用户预期一致）。
+type ModelGroupOptions struct {
+	PreferLastOK  *bool  `json:"prefer_last_ok"`
+	SniffEnabled  *bool  `json:"sniff_enabled"`
+	SniffInterval string `json:"sniff_interval"`  // 默认 "60s"
+	SniffMinUntil string `json:"sniff_min_until"` // 默认 "5m"
+	SniffMinGap   string `json:"sniff_min_gap"`   // 默认 "10m"
 }
 
 // Default 默认配置。
@@ -439,6 +462,8 @@ func Default() *Config {
 	c.Schedule.KeepaliveEnabled = true
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.GrowthEnabled = true
+	// 领奖方式缺省 manual：完成即领等于提前开始积分有效期倒计时。
+	c.Schedule.GrowthClaimMode = "manual"
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
 	c.Schedule.TaskSweepEnabled = true
@@ -922,6 +947,38 @@ func (c *Config) normalize() error {
 			delete(c.Pool.AccountShare, uid)
 		}
 	}
+	// 模型组参数：两个开关缺省 true；阈值空回落默认、非法 fail fast
+	//（拼写错误静默吞掉等于把探活周期变成 0，与 keepalive_refresh_window 同口径）。
+	preferLastOK, sniffEnabled := true, true
+	if c.Pool.ModelGroup.PreferLastOK != nil {
+		preferLastOK = *c.Pool.ModelGroup.PreferLastOK
+	}
+	if c.Pool.ModelGroup.SniffEnabled != nil {
+		sniffEnabled = *c.Pool.ModelGroup.SniffEnabled
+	}
+	mg := modelgroup.Options{PreferLastOK: preferLastOK, SniffEnabled: sniffEnabled}
+	for _, f := range []struct {
+		name string
+		raw  string
+		dst  *time.Duration
+	}{
+		{"pool.model_group.sniff_interval", c.Pool.ModelGroup.SniffInterval, &mg.SniffInterval},
+		{"pool.model_group.sniff_min_until", c.Pool.ModelGroup.SniffMinUntil, &mg.SniffMinUntil},
+		{"pool.model_group.sniff_min_gap", c.Pool.ModelGroup.SniffMinGap, &mg.SniffMinGap},
+	} {
+		if f.raw == "" {
+			continue // 空 = 回落默认（WithDefaults 补）
+		}
+		d, err := time.ParseDuration(f.raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", f.name, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("%s: %q 必须为正时长", f.name, f.raw)
+		}
+		*f.dst = d
+	}
+	c.ModelGroupOpts = mg.WithDefaults()
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
 	}
@@ -974,6 +1031,16 @@ func (c *Config) normalize() error {
 	}
 	if c.Schedule.GrowthConcurrency > 4 {
 		return fmt.Errorf("schedule.growth_concurrency: %d 非法（1-4，手动入口同为 4 上限）", c.Schedule.GrowthConcurrency)
+	}
+	// 领奖模式：空回落 manual（老配置无此键）；非法值 fail fast——静默回落会
+	// 把用户的显式选择吃掉，而这里选错等于「该领的没领 / 不该领的领了」。
+	if c.Schedule.GrowthClaimMode == "" {
+		c.Schedule.GrowthClaimMode = "manual"
+	}
+	switch c.Schedule.GrowthClaimMode {
+	case "manual", "auto":
+	default:
+		return fmt.Errorf("schedule.growth_claim_mode: %q 非法（manual = 完成不领，留待人工领取；auto = 达标即领）", c.Schedule.GrowthClaimMode)
 	}
 	if c.Schedule.JitterMinutes < 0 || c.Schedule.JitterMinutes > 1440 {
 		return fmt.Errorf("schedule.jitter_minutes: %d 非法（0 = 关闭，上限 1440）", c.Schedule.JitterMinutes)

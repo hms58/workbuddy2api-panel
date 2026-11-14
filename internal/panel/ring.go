@@ -65,6 +65,8 @@ type Ring struct {
 	cap          int
 	taskArchive  string
 	archiveError string
+	// 任务频道落盘去抖状态；逻辑全在 taskaudit.go（本仓定制，便于合并主干）。
+	persist *taskPersist
 }
 
 // NewRing 构建每频道容量为 capacity 的日志环（非正值回退 500）。
@@ -195,7 +197,8 @@ func (r *Ring) Write(p []byte) (int, error) {
 		taskChanged = taskChanged || channel == ChTask
 	}
 	if taskChanged {
-		r.persistTasksLocked()
+		// 去抖落盘（实现见 taskaudit.go）：整份重写在任务行密集时是主要写放大。
+		r.scheduleTaskPersist()
 	}
 	return len(p), nil
 }

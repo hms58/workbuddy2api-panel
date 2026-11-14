@@ -453,6 +453,7 @@ curl -s http://localhost:7863/v1/messages \
 | `schedule.blackcat_hours` | `[23]` | 每日本地时区整点夜猫子补足（23:00–08:00 计数窗口） |
 | `schedule.growth_hours` | `[11]` | 每日本地时区整点自动跑一遍**成长任务队列**（任务中心待办：扫描 → accept → 动作 → 达标领奖） |
 | `schedule.growth_concurrency` | `1` | 排程轮次的账号间并发（1-4，>4 启动报错）；越高越快，上游风控暴露面越大 |
+| `schedule.growth_claim_mode` | `manual` | 成长任务领奖模式：`manual`（默认）定时轮次只完成动作，积分留到面板「领取 / 全部领取」；`auto` 恢复旧行为（达标即领）。活动任务剩余不足 24 小时时两种模式都自动领，避免过期；非法值启动报错 |
 | `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
 | `schedule.activity_enabled` | `true` | 活跃上报总开关 |
@@ -511,6 +512,27 @@ curl -s http://localhost:7863/v1/messages \
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
 `WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+
+### 任务通知（钉钉 / 企业微信）
+
+两类事件可推到群机器人：**任务活动有新任务**、**自动领取积分**（同一轮的多笔领取合并成一条，避免刷屏）。不配置即全静默，不影响任何主流程。
+
+配置入口：面板「配置」页底部的**任务通知**卡片（保存即热生效，无需重启；URL 只回显打码值，输入框留空表示不修改）。
+
+等价地也可以直接写 `task-logs.json`（默认 `data/task-logs.json`）同目录的 `notify.json`，或用同名环境变量覆盖：
+
+```json
+{
+  "dingtalk": { "enabled": true, "url": "https://oapi.dingtalk.com/robot/send?access_token=...", "secret": "SEC..." },
+  "wecom":    { "enabled": false, "url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." },
+  "events":   { "new_task": true, "auto_claim": true }
+}
+```
+
+- 每个渠道有独立**开关**（`enabled`，缺省视为开启）：关掉后即使 URL 还在也不推送，URL 与密钥保留，重新打开即恢复；配置了多个渠道时，每个渠道各收到一条。
+- 钉钉 `secret` 对应机器人「加签」；用关键词模式时留空即可（URL 原样发出）。
+- 环境变量：`WB2A_NOTIFY_DINGTALK_URL` / `WB2A_NOTIFY_DINGTALK_SECRET` / `WB2A_NOTIFY_WECOM_URL`（优先于文件，且视同启用）。
+- 「新任务」按账号记住已见 `task_code`（`data/task-seen.json`），**首次见到某账号只记录不提醒**；面板保存即时生效，手工改文件则下次启动生效。
 
 ## 核心行为语义
 
@@ -655,6 +677,8 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 - **结果汇总**：排程轮次跑完写一行面板日志（`第 N 轮 X 项：完成 a / 跳过 b / 失败 c · 领奖 p 分 +q 能 · 耗时 t · 失败项 CODE`），并在 `alerting.enabled` 打开时**推同一条到告警 webhook**（`event=notify`）；未配 alerting 就只落日志。手动轮次不推送（界面在看，别刷通知）
 - 手动补跑：面板任务中心的「执行队列」按钮，或 `POST /admin/tasks/growth/run`（需 `admin.enabled`）
 - 关闭：`schedule.growth_enabled: false`（只关排程，任务中心手动入口照旧可用）
+
+> **完成与领奖已拆成两步**：`schedule.growth_claim_mode=manual`（默认）下，定时轮次只推进任务进度、不领取积分——官方奖励积分只有一个月有效期，做完立刻领等于提前开始倒计时。需要时在面板任务弹窗点「领取」或「全部领取」。启动与新账号登录都不再自动跑成长任务，一律等 `growth_hours` 的定时时点。
 
 #### 禁用账号与保号任务（`schedule.include_disabled_in_tasks`）
 
